@@ -208,6 +208,8 @@ type SupervisorRun[O object.Object, OList client.ObjectList] struct {
 	Obj O
 	// now is the time at which the run started, and should be used for the current time for all operations
 	Now time.Time
+
+	Log logr.Logger
 }
 
 // Fetch fetches the object that triggered the run
