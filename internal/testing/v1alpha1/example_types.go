@@ -80,8 +80,18 @@ func (e *ExampleList) AppendEmpty() *Example {
 	return &e.Items[ix]
 }
 
+func (e *ExampleList) Append(item *Example) {
+	e.Items = append(e.Items, *item)
+}
+
 func (e *ExampleList) Reset(cap int) {
 	e.Items = make([]Example, 0, cap)
+}
+
+func (e *ExampleList) For(f func(int, *Example)) {
+	for ix := range e.Items {
+		f(ix, &e.Items[ix])
+	}
 }
 
 func init() {

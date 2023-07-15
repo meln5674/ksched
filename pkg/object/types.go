@@ -14,8 +14,10 @@ type Object interface {
 	Successful() bool
 }
 
-type ObjectList[O Object] interface {
+type ObjectList[O client.Object] interface {
 	client.ObjectList
 	Reset(cap int)
+	Append(O)
 	AppendEmpty() O
+	For(func(int, O))
 }
