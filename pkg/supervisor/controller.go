@@ -18,18 +18,20 @@ import (
 
 	"github.com/go-logr/logr"
 
+	"github.com/meln5674/ksched/pkg/archive"
 	"github.com/meln5674/ksched/pkg/object"
+	"github.com/meln5674/ksched/pkg/scheduler"
 )
 
 // A recordingScheduler records the last time an executor was observed
 type recordingScheduler[O object.Object] struct {
 	now                time.Time
 	lastExecutorChange **time.Time
-	scheduler          Scheduler[O]
+	scheduler          scheduler.Scheduler[O]
 }
 
 // ObserveExecutor implements scheduler
-func (r *recordingScheduler[O]) ObserveExecutor(name string, status *ExecutorStatus) {
+func (r *recordingScheduler[O]) ObserveExecutor(name string, status *scheduler.ExecutorStatus) {
 	if *r.lastExecutorChange == nil {
 		*r.lastExecutorChange = new(time.Time)
 	}
@@ -54,7 +56,7 @@ func (r *recordingScheduler[O]) ChooseExecutor(obj O) (string, error) {
 
 // SchedulerState is the internal, mutable state of a scheduler
 type SchedulerState[O object.Object] struct {
-	scheduler          Scheduler[O]
+	scheduler          scheduler.Scheduler[O]
 	lock               sync.Mutex
 	lastExecutorChange *time.Time
 }
@@ -71,7 +73,7 @@ func (s *SchedulerState[O]) LastExecutorChange() *time.Time {
 }
 
 // recordingScheduler returns a wrapper that will record if an executor is observed
-func (s *SchedulerState[O]) recordingScheduler(now time.Time) Scheduler[O] {
+func (s *SchedulerState[O]) recordingScheduler(now time.Time) scheduler.Scheduler[O] {
 	return &recordingScheduler[O]{
 		scheduler:          s.scheduler,
 		lastExecutorChange: &s.lastExecutorChange,
@@ -80,28 +82,28 @@ func (s *SchedulerState[O]) recordingScheduler(now time.Time) Scheduler[O] {
 }
 
 // NewSchedulerState returns a new scheduler state that will be maniuplated by the provided scheduler
-func NewSchedulerState[O object.Object](s Scheduler[O]) *SchedulerState[O] {
+func NewSchedulerState[O object.Object](s scheduler.Scheduler[O]) *SchedulerState[O] {
 	return &SchedulerState[O]{
 		scheduler: s,
 	}
 }
 
 // WithSchedulerLock executes a nil-ary function using a lock
-func WithSchedulerLock0[O object.Object](s *SchedulerState[O], now time.Time, f func(s Scheduler[O])) {
+func WithSchedulerLock0[O object.Object](s *SchedulerState[O], now time.Time, f func(s scheduler.Scheduler[O])) {
 	s.lock.Lock()
 	defer s.lock.Unlock()
 	f(s.recordingScheduler(now))
 }
 
 // WithSchedulerLock executes a 1-ary function using a lock
-func WithSchedulerLock1[O object.Object, T any](s *SchedulerState[O], now time.Time, f func(s Scheduler[O]) T) T {
+func WithSchedulerLock1[O object.Object, T any](s *SchedulerState[O], now time.Time, f func(s scheduler.Scheduler[O]) T) T {
 	s.lock.Lock()
 	defer s.lock.Unlock()
 	return f(s.recordingScheduler(now))
 }
 
 // WithSchedulerLock executes a 2-ary function using a lock
-func WithSchedulerLock2[O object.Object, T any, U any](s *SchedulerState[O], now time.Time, f func(s Scheduler[O]) (T, U)) (T, U) {
+func WithSchedulerLock2[O object.Object, T any, U any](s *SchedulerState[O], now time.Time, f func(s scheduler.Scheduler[O]) (T, U)) (T, U) {
 	s.lock.Lock()
 	defer s.lock.Unlock()
 	return f(s.recordingScheduler(now))
@@ -138,7 +140,7 @@ type Supervisor[O object.Object, OList client.ObjectList] struct {
 	// NewObject must return a blank object of the type the supervisor supervises
 	NewObject func() O
 	// Archiver is used to move completed objects to an archive to reduce load on etcd
-	Archiver[O, OList]
+	archive.Archiver[O, OList]
 	// SchedulerState is the scheduling algorithm used to assign objects to executors,
 	// as well as the state it acts on
 	*SchedulerState[O]
@@ -150,7 +152,7 @@ type Supervisor[O object.Object, OList client.ObjectList] struct {
 func (s *Supervisor[O, OList]) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	now := time.Now()
 
-	return WithSchedulerLock2[O, ctrl.Result, error](s.SchedulerState, now, func(sched Scheduler[O]) (ctrl.Result, error) {
+	return WithSchedulerLock2[O, ctrl.Result, error](s.SchedulerState, now, func(sched scheduler.Scheduler[O]) (ctrl.Result, error) {
 		s.Log.Info("Got event")
 		run := SupervisorRun[O, OList]{
 			Supervisor: s,
@@ -199,7 +201,7 @@ type SupervisorRun[O object.Object, OList client.ObjectList] struct {
 	// Supervisor is a pointer to the Supervisor for the run
 	*Supervisor[O, OList]
 	// Scheduler is the scheduling algorithm to use
-	Scheduler[O]
+	scheduler.Scheduler[O]
 	// req is the request that triggered the run
 	Req ctrl.Request
 	// ctx is the context of the request
@@ -339,7 +341,7 @@ func (r *SupervisorRun[O, OList]) ScheduleIfReady() (bool, ctrl.Result, error) {
 	}
 
 	executorName, err := r.ChooseExecutor(r.Obj)
-	if errors.Is(err, ErrNoExecutors) || errors.Is(err, ErrNoHealthyExecutors) {
+	if errors.Is(err, scheduler.ErrNoExecutors) || errors.Is(err, scheduler.ErrNoHealthyExecutors) {
 		r.Log.Info("No executors ready", "error", err)
 		return false, ctrl.Result{Requeue: true, RequeueAfter: r.RequeueDelay}, nil
 	}
@@ -431,7 +433,7 @@ type PodWatcher[O object.Object] struct {
 func (p *PodWatcher[O]) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	now := time.Now()
 
-	return WithSchedulerLock2[O, ctrl.Result, error](p.SchedulerState, now, func(s Scheduler[O]) (ctrl.Result, error) {
+	return WithSchedulerLock2[O, ctrl.Result, error](p.SchedulerState, now, func(s scheduler.Scheduler[O]) (ctrl.Result, error) {
 
 		p.Log.Info("Got pod event")
 		run := PodWatcherRun[O]{
@@ -467,7 +469,7 @@ func (r *PodWatcher[O]) SetupWithManager(mgr ctrl.Manager) error {
 // PodWatcherRun is all of the context for observing a pod as an executor
 type PodWatcherRun[O object.Object] struct {
 	*PodWatcher[O]
-	Scheduler[O]
+	scheduler.Scheduler[O]
 	req ctrl.Request
 	ctx context.Context
 	pod *corev1.Pod
@@ -491,14 +493,14 @@ func (r *PodWatcherRun[O]) Fetch() (bool, error) {
 func (r *PodWatcherRun[O]) Observe(exists bool) {
 	if !exists {
 		r.Log.Info("Executor removed", "executor", r.pod.Name)
-		r.ObserveExecutor(r.pod.Name, ExecutorRemoved)
+		r.ObserveExecutor(r.pod.Name, scheduler.ExecutorRemoved)
 		return
 	}
 	if PodReady(r.pod) {
 		r.Log.Info("Executor healthy", "executor", r.pod.Name)
-		r.ObserveExecutor(r.pod.Name, HavingStatus(ExecutorHealthy))
+		r.ObserveExecutor(r.pod.Name, scheduler.HavingStatus(scheduler.ExecutorHealthy))
 		return
 	}
 	r.Log.Info("Executor unhealthy", "executor", r.pod.Name)
-	r.ObserveExecutor(r.pod.Name, HavingStatus(ExecutorUnhealthy))
+	r.ObserveExecutor(r.pod.Name, scheduler.HavingStatus(scheduler.ExecutorUnhealthy))
 }

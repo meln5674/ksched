@@ -15,6 +15,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	example "github.com/meln5674/ksched/internal/testing/v1alpha1"
+	"github.com/meln5674/ksched/pkg/archive"
+	"github.com/meln5674/ksched/pkg/scheduler"
 	"github.com/meln5674/ksched/pkg/supervisor"
 )
 
@@ -50,7 +52,7 @@ var _ = Describe("Supervisor", Label("supervisor"), func() {
 		})
 
 		schedulerState := supervisor.NewSchedulerState[*example.Example](
-			supervisor.NewRoundRobinScheduler[*example.Example](1),
+			scheduler.NewRoundRobinScheduler[*example.Example](1),
 		)
 
 		sv = Supervisor{
@@ -62,7 +64,7 @@ var _ = Describe("Supervisor", Label("supervisor"), func() {
 			},
 			NewObject: func() *example.Example { return new(example.Example) },
 			Log:       ctrl.Log.WithName("supervisor"),
-			Archiver: &supervisor.InMemoryArchiver[*example.Example, *example.ExampleList]{
+			Archiver: &archive.InMemoryArchiver[*example.Example, *example.ExampleList]{
 				Objects:   make(map[string]map[string]*example.Example),
 				NewObject: func() *example.Example { return new(example.Example) },
 				ListOf: func(es []*example.Example) *example.ExampleList {
