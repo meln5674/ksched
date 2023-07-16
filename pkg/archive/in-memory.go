@@ -3,6 +3,7 @@ package archive
 import (
 	"context"
 	"strings"
+	"sync"
 
 	example "github.com/meln5674/ksched/internal/testing/v1alpha1"
 	"github.com/meln5674/ksched/pkg/object"
@@ -23,12 +24,15 @@ type InMemoryArchiver[O object.Object, OList object.ObjectList[O]] struct {
 	DeepCopyInto func(src, dest O)
 	// DeepCopy returns a copy of an object
 	DeepCopy func(obj O) O
+	lock     sync.Mutex
 }
 
 var _ = Archiver[*example.Example, *example.ExampleList](&InMemoryArchiver[*example.Example, *example.ExampleList]{})
 
 // ArchiveObject implements Archiver
 func (a *InMemoryArchiver[O, OList]) ArchiveObject(ctx context.Context, obj O) error {
+	a.lock.Lock()
+	defer a.lock.Unlock()
 	ns, ok := a.Objects[obj.GetNamespace()]
 	if !ok {
 		ns = make(map[string]O)
@@ -40,6 +44,8 @@ func (a *InMemoryArchiver[O, OList]) ArchiveObject(ctx context.Context, obj O) e
 
 // GetObject implements Archiver
 func (a *InMemoryArchiver[O, OList]) GetObject(ctx context.Context, key client.ObjectKey, obj O) error {
+	a.lock.Lock()
+	defer a.lock.Unlock()
 	ns, ok := a.Objects[key.Namespace]
 	if !ok {
 		return ErrNotExist
@@ -54,6 +60,8 @@ func (a *InMemoryArchiver[O, OList]) GetObject(ctx context.Context, key client.O
 
 // SearchObjects implements Archiver
 func (a *InMemoryArchiver[O, OList]) SearchObjects(ctx context.Context, q Query, os OList) error {
+	a.lock.Lock()
+	defer a.lock.Unlock()
 	nsSet := make(map[string]struct{}, len(q.Namespaces))
 	for _, ns := range q.Namespaces {
 		nsSet[ns] = struct{}{}
