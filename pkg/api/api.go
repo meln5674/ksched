@@ -18,6 +18,7 @@ import (
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/discovery"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/meln5674/ksched/pkg/archive"
@@ -155,8 +156,9 @@ type Config struct {
 
 // LoggableRequest contains the loggable parts of an http.Request, and is used to log it for debugging
 type LoggableRequest struct {
-	URL    *url.URL
+	URL    url.URL
 	Method string
+	Header http.Header
 }
 
 type TypedAPI[O client.Object, OList object.ObjectList[O]] struct {
@@ -205,6 +207,7 @@ func (a *TypedAPI[O, OList]) Create(ctx context.Context, req *RequestWithBody, l
 		handleK8sError(w, err)
 		return
 	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	err = json.NewEncoder(w).Encode(obj)
 	if err != nil {
@@ -265,6 +268,7 @@ func (a *TypedAPI[O, OList]) Get(ctx context.Context, req *RequestWithBody, lr L
 		return
 	}
 	obj.GetObjectKind().SetGroupVersionKind(gvk)
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	err = json.NewEncoder(w).Encode(obj)
 	if err != nil {
@@ -307,6 +311,7 @@ func (a *TypedAPI[O, OList]) List(ctx context.Context, req *RequestWithBody, lr 
 		return
 	}
 	objs.GetObjectKind().SetGroupVersionKind(a.info.ListGVK())
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	err = json.NewEncoder(w).Encode(objs)
 	if err != nil {
@@ -356,6 +361,7 @@ func (a *TypedAPI[O, OList]) Update(ctx context.Context, req *RequestWithBody, l
 		handleK8sError(w, err)
 		return
 	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	err = json.NewEncoder(w).Encode(obj)
 	if err != nil {
@@ -416,8 +422,11 @@ type API struct {
 	// Log is the logger to use
 	Log logr.Logger
 
-	// K8s is the client to access kubernetes from
-	K8s        client.Client
+	// K8s is the client to access kubernetes with
+	K8s client.Client
+	// K8sDiscovery is the client to use for kubernetes API discovery. It should use the same connection configuration as K8s.
+	K8sDiscovery *discovery.DiscoveryClient
+	// RBACPolicy maps a JWT to a set of roles/cluster roles that token should act as though it has
 	RBACPolicy TokenPolicy
 	// Decoder decodes kubernetes YAMLs and JSON
 	Decoder runtime.Decoder
@@ -456,8 +465,9 @@ func RegisterType[O client.Object, OList object.ObjectList[O]](a *API, urlKind s
 // ServeHTTP implements http.Handler.
 func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	lr := LoggableRequest{
-		URL:    r.URL,
+		URL:    *r.URL,
 		Method: r.Method,
+		Header: r.Header,
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -469,6 +479,7 @@ func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	r.URL.Path = strings.TrimPrefix(r.URL.Path, a.Prefix)
+	defer func() { r.URL.Path = a.Prefix + r.URL.Path }()
 
 	var req RequestWithBody
 	ok, err := a.Authenticate(r, &req)
@@ -480,7 +491,7 @@ func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
-	ok, err = a.ParseRequest(r, &req)
+	ok, err = a.ParseRequest(r, lr, &req)
 	if err != nil {
 		a.Log.Error(err, "Error parsing request", "req", lr)
 		w.WriteHeader(http.StatusBadRequest)
@@ -491,47 +502,119 @@ func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
-	a.Log.Info("Parsed method/path/gvk", "req", lr, "parsed", req.Request)
-	roles, err := a.RBACPolicy.GetRoles(req.Token)
-	if err != nil {
-		a.Log.Error(err, "Error preparing authorization", "req", lr)
-		w.WriteHeader(http.StatusForbidden)
-		return
-	}
-	gvk := schema.GroupVersionKind{Group: req.Group, Version: req.Version, Kind: req.Kind}
-	ok = roles.Authorize(gvk, client.ObjectKey{Namespace: req.Namespace, Name: req.Name}, req.Verb)
-	if !ok {
-		a.Log.Info("Request is not authorized", "req", lr)
-		w.WriteHeader(http.StatusForbidden)
-		return
-	}
-	verbs, ok := a.verbs[gvk]
-	if !ok {
-		a.Log.Info("Got request for unknown object type", "req", lr)
-		w.WriteHeader(http.StatusNotFound)
-		return
-	}
-	switch req.Verb {
-	case "create":
-		verbs.Create(ctx, &req, lr, w)
-		return
-	case "get":
-		verbs.Get(ctx, &req, lr, w)
-		return
-	case "list":
-		verbs.List(ctx, &req, lr, w)
-		return
-	case "update":
-		verbs.Update(ctx, &req, lr, w)
-		return
-	case "delete":
-		verbs.Delete(ctx, &req, lr, w)
-		return
-	case "deletecollection":
-		verbs.DeleteCollection(ctx, &req, lr, w)
-		return
-	default:
-		panic(fmt.Sprintf("BUG: Invalid verb %s", req.Verb))
+
+	switch req.Type {
+	case RequestTypeResource:
+		a.Log.Info("Parsed method/path/gvk", "req", lr, "parsed", req.Request)
+		roles, err := a.RBACPolicy.GetRoles(req.Token)
+		if err != nil {
+			a.Log.Error(err, "Error preparing authorization", "req", lr, "parsed", req.Request)
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		gvk := schema.GroupVersionKind{Group: req.Group, Version: req.Version, Kind: req.Kind}
+		ok = roles.Authorize(gvk, client.ObjectKey{Namespace: req.Namespace, Name: req.Name}, req.Verb)
+		if !ok {
+			a.Log.Info("Request is not authorized", "req", lr, "parsed", req.Request)
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		verbs, ok := a.verbs[gvk]
+		if !ok {
+			a.Log.Info("Got request for unknown object type", "req", lr, "parsed", req.Request)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		switch req.Verb {
+		case "create":
+			verbs.Create(ctx, &req, lr, w)
+			return
+		case "get":
+			verbs.Get(ctx, &req, lr, w)
+			return
+		case "list":
+			verbs.List(ctx, &req, lr, w)
+			return
+		case "update":
+			verbs.Update(ctx, &req, lr, w)
+			return
+		case "delete":
+			verbs.Delete(ctx, &req, lr, w)
+			return
+		case "deletecollection":
+			verbs.DeleteCollection(ctx, &req, lr, w)
+			return
+		default:
+			panic(fmt.Sprintf("BUG: Invalid verb %s", req.Verb))
+		}
+	case RequestTypeLegacyDiscovery:
+		if req.Version == "" {
+			a.Log.Info("Performing legacy API discovery", "req", lr, "parsed", req.Request)
+			// This section largely based on https://github.com/kubernetes/client-go/blob/64a35f6a46ec8a791d437495fd91c87bcd01a5b5/discovery/discovery_client.go#L233
+			var responseContentType string
+			body, err := a.K8sDiscovery.RESTClient().Get().
+				AbsPath("/api").
+				SetHeader("Accept", discovery.AcceptV1).
+				Do(context.TODO()).
+				ContentType(&responseContentType).
+				Raw()
+			// Tolerate 404, since aggregated api servers can return it.
+			if err != nil && !kerrors.IsNotFound(err) {
+				a.Log.Error(err, "Legacy API discovery failed", "req", lr, "parsed", req.Request)
+				handleK8sError(w, err)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_, err = w.Write(body)
+			if err != nil {
+				a.Log.Error(err, "Error writing reponse body", "req", lr, "parsed", req.Request)
+				return
+			}
+		} else {
+			a.Log.Info("Performing Legacy API Version discovery", "req", lr, "parsed", req.Request)
+			resourceList, err := a.K8sDiscovery.ServerResourcesForGroupVersion(req.Version)
+			if err != nil {
+				a.Log.Error(err, "Legacy API Version discovery failed", "req", lr, "parsed", req.Request)
+				handleK8sError(w, err)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			err = json.NewEncoder(w).Encode(resourceList)
+			if err != nil {
+				a.Log.Error(err, "Error writing reponse body", "req", lr, "parsed", req.Request)
+				return
+			}
+		}
+	case RequestTypeDiscovery:
+		var body interface{}
+		if req.Group == "" && req.Version == "" {
+			a.Log.Info("Performing API Group/Version discovery", "req", lr, "parsed", req.Request)
+			groupList, err := a.K8sDiscovery.ServerGroups()
+			if err != nil {
+				a.Log.Error(err, "API Group/Version discovery failed", "req", lr, "parsed", req.Request)
+				handleK8sError(w, err)
+				return
+			}
+			body = groupList
+		} else {
+			a.Log.Info("Performing API discovery", "req", lr, "parsed", req.Request)
+			resourceList, err := a.K8sDiscovery.ServerResourcesForGroupVersion(req.Group + "/" + req.Version)
+			if err != nil {
+				a.Log.Error(err, "API discovery failed", "req", lr, "parsed", req.Request)
+				handleK8sError(w, err)
+				return
+			}
+			body = resourceList
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		err = json.NewEncoder(w).Encode(body)
+		if err != nil {
+			a.Log.Error(err, "Error writing reponse body", "req", lr, "parsed", req.Request)
+			return
+		}
+
 	}
 }
 
@@ -563,7 +646,16 @@ func (a *API) ExecuteOnK8s(ctx context.Context, req *RequestWithBody, obj client
 	panic("BUG: Invalid verb")
 }
 
+type RequestType string
+
+const (
+	RequestTypeResource        = "resource"
+	RequestTypeLegacyDiscovery = "legacy-discovery"
+	RequestTypeDiscovery       = "discovery"
+)
+
 type Request struct {
+	Type      RequestType
 	Token     *jwt.Token
 	Version   string
 	Group     string
@@ -580,14 +672,41 @@ type RequestWithBody struct {
 	Body io.Reader
 }
 
-func ParseNamespacedSingleResourcePath(s string, r *RequestWithBody) bool {
-	parts := strings.Split(strings.TrimSuffix(strings.TrimPrefix(s, "/"), "/"), "/")
+func ParseLegacyDiscoveryPath(parts []string, r *RequestWithBody) bool {
+	if len(parts) == 0 {
+		r.Type = RequestTypeLegacyDiscovery
+		return true
+	}
+	if len(parts) == 1 {
+		r.Type = RequestTypeLegacyDiscovery
+		r.Version = parts[0]
+		return true
+	}
+	return false
+}
+
+func ParseDiscoveryPath(parts []string, r *RequestWithBody) bool {
+	if len(parts) == 0 {
+		r.Type = RequestTypeDiscovery
+		return true
+	}
+	if len(parts) == 2 {
+		r.Type = RequestTypeDiscovery
+		r.Group = parts[0]
+		r.Version = parts[1]
+		return true
+	}
+	return false
+}
+
+func ParseNamespacedSingleResourcePath(parts []string, r *RequestWithBody) bool {
 	if len(parts) != 6 {
 		return false
 	}
 	if parts[2] != "namespaces" {
 		return false
 	}
+	r.Type = RequestTypeResource
 	r.Group = parts[0]
 	r.Version = parts[1]
 	r.Namespace = parts[3]
@@ -596,11 +715,11 @@ func ParseNamespacedSingleResourcePath(s string, r *RequestWithBody) bool {
 	return true
 }
 
-func ParseClusterSingleResourcePath(s string, r *RequestWithBody) bool {
-	parts := strings.Split(strings.TrimSuffix(strings.TrimPrefix(s, "/"), "/"), "/")
+func ParseClusterSingleResourcePath(parts []string, r *RequestWithBody) bool {
 	if len(parts) != 4 {
 		return false
 	}
+	r.Type = RequestTypeResource
 	r.Group = parts[0]
 	r.Version = parts[1]
 	r.Kind = parts[2]
@@ -608,14 +727,14 @@ func ParseClusterSingleResourcePath(s string, r *RequestWithBody) bool {
 	return true
 }
 
-func ParseNamespacedAllResourcesPath(s string, r *RequestWithBody) bool {
-	parts := strings.Split(strings.TrimSuffix(strings.TrimPrefix(s, "/"), "/"), "/")
+func ParseNamespacedAllResourcesPath(parts []string, r *RequestWithBody) bool {
 	if len(parts) != 5 {
 		return false
 	}
 	if parts[2] != "namespaces" {
 		return false
 	}
+	r.Type = RequestTypeResource
 	r.Group = parts[0]
 	r.Version = parts[1]
 	r.Namespace = parts[3]
@@ -623,90 +742,116 @@ func ParseNamespacedAllResourcesPath(s string, r *RequestWithBody) bool {
 	return true
 }
 
-func ParseClusterAllResourcesPath(s string, r *RequestWithBody) bool {
-	parts := strings.Split(strings.TrimSuffix(strings.TrimPrefix(s, "/"), "/"), "/")
+func ParseClusterAllResourcesPath(parts []string, r *RequestWithBody) bool {
 	if len(parts) != 3 {
 		return false
 	}
+	r.Type = RequestTypeResource
 	r.Group = parts[0]
 	r.Version = parts[1]
 	r.Kind = parts[2]
 	return true
 }
 
-func (a *API) ParseRequest(r *http.Request, req *RequestWithBody) (bool, error) {
+const LegacyPrefix = "api"
+const APIsPrefix = "apis"
+
+func (a *API) ParseRequest(r *http.Request, lr LoggableRequest, req *RequestWithBody) (bool, error) {
 	// URL Structure:
-	// - {prefix}/{group}/{version}/[namespaces/{namespace}/]{kind}[/{name}]
+	// - {prefix}/api/{group}/{version}/[namespaces/{namespace}/]{kind}[/{name}]: Proxy access to k8s resources. Requires authoriziation.
+	// - {prefix}/apis[/...]: Proxy direct request to k8s for api info. No authorization required
 	// {namespace} is empty for cluster-scoped actions
-	switch r.Method {
-	case http.MethodHead:
-		// Checking permissions to single resource or listing all resources by type, used by UI
-		if ParseNamespacedSingleResourcePath(r.URL.Path, req) {
-			req.Verb = "get"
-		} else if ParseNamespacedAllResourcesPath(r.URL.Path, req) {
-			req.Verb = "list"
-		} else if ParseClusterSingleResourcePath(r.URL.Path, req) {
-			req.Verb = "get"
-		} else if ParseClusterAllResourcesPath(r.URL.Path, req) {
-			req.Verb = "list"
-		} else {
-			a.Log.Info("Can't parse HEAD as either single or all resources path", "req", r)
+
+	parts := strings.Split(strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/"), "/"), "/")
+	a.Log.Info("Parsing URL parts", "req", lr, "parts", parts)
+
+	if parts[0] == LegacyPrefix && r.Method == http.MethodGet {
+		if ParseLegacyDiscoveryPath(parts[1:], req) {
+			return true, nil
+		}
+		return false, nil
+	} else if parts[0] == APIsPrefix {
+		switch r.Method {
+		case http.MethodHead:
+			// Checking permissions to single resource or listing all resources by type, used by UI
+			if ParseNamespacedSingleResourcePath(parts[1:], req) {
+				req.Verb = "get"
+			} else if ParseNamespacedAllResourcesPath(parts[1:], req) {
+				req.Verb = "list"
+			} else if ParseClusterSingleResourcePath(parts[1:], req) {
+				req.Verb = "get"
+			} else if ParseClusterAllResourcesPath(parts[1:], req) {
+				req.Verb = "list"
+			} else {
+				a.Log.Info("Can't parse HEAD as either single or all resources path", "req", lr)
+				return false, nil
+			}
+			req.DryRun = true
+			return true, nil
+		case http.MethodPost:
+			// Creating a resource
+			if !ParseNamespacedAllResourcesPath(parts[1:], req) {
+				a.Log.Info("Can't parse POST as all resources path", "req", lr)
+				return false, nil
+			}
+			req.Verb = "create"
+			req.Body = r.Body
+			return true, nil
+		case http.MethodGet:
+			// Either a reading single resource by name, or a list all of resource type
+			if ParseDiscoveryPath(parts[1:], req) {
+				// Discovery all apis or discovery group/version
+				return true, nil
+			} else if ParseNamespacedSingleResourcePath(parts[1:], req) {
+				// Get single namespaced object
+				req.Verb = "get"
+			} else if ParseNamespacedAllResourcesPath(parts[1:], req) {
+				// List all objects in namespace
+				req.Verb = "list"
+			} else if ParseClusterSingleResourcePath(parts[1:], req) {
+				// Get single cluster-scoped object
+				req.Verb = "get"
+			} else if ParseClusterAllResourcesPath(parts[1:], req) {
+				// List all objects in all namespaces
+				req.Verb = "list"
+			} else {
+				a.Log.Info("Can't parse GET as either single or multiple object path", "req", lr)
+				return false, nil
+			}
+			return true, nil
+		case http.MethodPut:
+			// Update a single resource by name
+			if !ParseNamespacedSingleResourcePath(parts[1:], req) {
+				a.Log.Info("Can't parse PUT as single resource path", "req", lr)
+				return false, nil
+			}
+			req.Verb = "update"
+			req.Body = r.Body
+			return true, nil
+		case http.MethodDelete:
+			// Either delete a single resource by name, or delete all resources in namespace
+			if ParseNamespacedSingleResourcePath(parts[1:], req) {
+				req.Verb = "delete"
+			} else if ParseNamespacedAllResourcesPath(parts[1:], req) {
+				req.Verb = "deletecollection"
+			} else if ParseNamespacedSingleResourcePath(parts[1:], req) {
+				req.Verb = "delete"
+			} else if ParseNamespacedAllResourcesPath(parts[1:], req) {
+				req.Verb = "deletecollection"
+			} else {
+				a.Log.Info("Can't parse DELETE as either single or multiple object path", "req", lr)
+				return false, nil
+			}
+			return true, nil
+		default:
+			a.Log.Info("Unknown method", "req", lr)
 			return false, nil
 		}
-		req.DryRun = true
-		return true, nil
-	case http.MethodPost:
-		// Creating a resource
-		if !ParseNamespacedAllResourcesPath(r.URL.Path, req) {
-			a.Log.Info("Can't parse POST as all resources path", "req", r)
-			return false, nil
-		}
-		req.Verb = "create"
-		req.Body = r.Body
-		return true, nil
-	case http.MethodGet:
-		// Either a reading single resource by name, or a list all of resource type
-		if ParseNamespacedSingleResourcePath(r.URL.Path, req) {
-			req.Verb = "get"
-		} else if ParseNamespacedAllResourcesPath(r.URL.Path, req) {
-			req.Verb = "list"
-		} else if ParseClusterSingleResourcePath(r.URL.Path, req) {
-			req.Verb = "get"
-		} else if ParseClusterAllResourcesPath(r.URL.Path, req) {
-			req.Verb = "list"
-		} else {
-			a.Log.Info("Can't parse GET as either single or multiple object path", "req", r)
-			return false, nil
-		}
-		return true, nil
-	case http.MethodPut:
-		// Update a single resource by name
-		if !ParseNamespacedSingleResourcePath(r.URL.Path, req) {
-			a.Log.Info("Can't parse PUT as single resource path", "req", r)
-			return false, nil
-		}
-		req.Verb = "update"
-		req.Body = r.Body
-		return true, nil
-	case http.MethodDelete:
-		// Either delete a single resource by name, or delete all resources in namespace
-		if ParseNamespacedSingleResourcePath(r.URL.Path, req) {
-			req.Verb = "delete"
-		} else if ParseNamespacedAllResourcesPath(r.URL.Path, req) {
-			req.Verb = "deletecollection"
-		} else if ParseNamespacedSingleResourcePath(r.URL.Path, req) {
-			req.Verb = "delete"
-		} else if ParseNamespacedAllResourcesPath(r.URL.Path, req) {
-			req.Verb = "deletecollection"
-		} else {
-			a.Log.Info("Can't parse DELETE as either single or multiple object path", "req", r)
-			return false, nil
-		}
-		return true, nil
-	default:
-		a.Log.Info("Unknown method", "req", r)
+	} else {
+		a.Log.Info("Unknown path", "req", lr)
 		return false, nil
 	}
+
 }
 
 var kerrorMap = map[int][]func(error) bool{
