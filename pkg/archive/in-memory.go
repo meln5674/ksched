@@ -27,6 +27,13 @@ type InMemoryArchiver[O object.Object, OList object.ObjectList[O]] struct {
 	lock     sync.Mutex
 }
 
+// Sync synchronizes access to the archive
+func (a *InMemoryArchiver[O, OList]) Sync(f func()) {
+	a.lock.Lock()
+	defer a.lock.Unlock()
+	f()
+}
+
 var _ = Archiver[*example.Example, *example.ExampleList](&InMemoryArchiver[*example.Example, *example.ExampleList]{})
 
 // ArchiveObject implements Archiver
