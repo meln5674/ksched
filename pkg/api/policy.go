@@ -59,6 +59,9 @@ func (t *TemplatePolicy) GetRoles(token *jwt.Token) (*RequestRoles, error) {
 		if err != nil {
 			return nil, err
 		}
+		if len(bytes.TrimSpace(next)) == 0 {
+			continue
+		}
 		roleObj, _, err := t.Decoder.Decode(next, nil, nil)
 		if err != nil {
 			return nil, err
