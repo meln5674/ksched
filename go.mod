@@ -6,7 +6,7 @@ require (
 	github.com/go-logr/logr v1.2.4
 	github.com/golang-jwt/jwt/v4 v4.5.0
 	github.com/meln5674/gingk8s v0.0.0-20230611210336-c12659e2fc26
-	github.com/meln5674/gotoken v0.0.0-20230628035737-b842ff01fdef
+	github.com/meln5674/gotoken v0.0.0-20230722204619-acad9c07eca2
 	github.com/onsi/ginkgo/v2 v2.11.0
 	github.com/onsi/gomega v1.27.8
 	k8s.io/api v0.27.3

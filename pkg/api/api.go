@@ -159,6 +159,7 @@ type LoggableRequest struct {
 	URL    url.URL
 	Method string
 	Header http.Header
+	Token  *jwt.Token
 }
 
 type TypedAPI[O client.Object, OList object.ObjectList[O]] struct {
