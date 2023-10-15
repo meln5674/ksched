@@ -15,6 +15,7 @@ import (
 	"github.com/golang-jwt/jwt/v4"
 	"github.com/meln5674/gotoken"
 
+	"github.com/golang/protobuf/proto"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -23,6 +24,11 @@ import (
 
 	"github.com/meln5674/ksched/pkg/archive"
 	"github.com/meln5674/ksched/pkg/object"
+)
+
+const (
+	// From https://github.com/kubernetes/kubernetes/blob/v1.28.2/staging/src/k8s.io/client-go/discovery/discovery_client.go
+	openAPIV2mimePb = "application/com.github.proto-openapi.spec.v2@v1.0+protobuf"
 )
 
 // an ObjectInfo contains information and functionality related to creating and modifying Kubernetes API objects
@@ -208,6 +214,9 @@ func (a *TypedAPI[O, OList]) Create(ctx context.Context, req *RequestWithBody, l
 		handleK8sError(w, err)
 		return
 	}
+	// controller-runtime's Create method unsets the GVK
+	// because its made by people who definitely know what they're doing
+	obj.GetObjectKind().SetGroupVersionKind(a.info.GVK())
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	err = json.NewEncoder(w).Encode(obj)
@@ -389,7 +398,16 @@ func (a *TypedAPI[O, OList]) Delete(ctx context.Context, req *RequestWithBody, l
 		handleK8sError(w, err)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	// controller-runtime's Create method unsets the GVK
+	// because its made by people who definitely know what they're doing
+	obj.GetObjectKind().SetGroupVersionKind(a.info.GVK())
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	err = json.NewEncoder(w).Encode(obj)
+	if err != nil {
+		a.Log.Error(err, "Error writing response body", "req", lr)
+		return
+	}
 }
 
 func (a *TypedAPI[O, OList]) DeleteCollection(ctx context.Context, req *RequestWithBody, lr LoggableRequest, w http.ResponseWriter) {
@@ -548,6 +566,7 @@ func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		default:
 			panic(fmt.Sprintf("BUG: Invalid verb %s", req.Verb))
 		}
+	// TODO: Replace this all with just a reverse proxy
 	case RequestTypeLegacyDiscovery:
 		if req.Version == "" {
 			a.Log.Info("Performing legacy API discovery", "req", lr, "parsed", req.Request)
@@ -615,7 +634,34 @@ func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			a.Log.Error(err, "Error writing reponse body", "req", lr, "parsed", req.Request)
 			return
 		}
-
+	case RequestTypeOpenAPI:
+		switch req.Version {
+		case "v2":
+			openapiv2, err := a.K8sDiscovery.OpenAPISchema()
+			if err != nil {
+				a.Log.Error(err, "Failed to fetch openapi v2 schema")
+				handleK8sError(w, err)
+				return
+			}
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.Header().Set("X-Varied-Accept", openAPIV2mimePb)
+			w.Header().Set("Vary", "Accept")
+			w.WriteHeader(http.StatusOK)
+			bytes, err := proto.Marshal(openapiv2)
+			if err != nil {
+				a.Log.Error(err, "Error writing reponse body", "req", lr, "parsed", req.Request)
+				return
+			}
+			_, err = w.Write(bytes)
+			if err != nil {
+				a.Log.Error(err, "Error writing reponse body", "req", lr, "parsed", req.Request)
+				return
+			}
+		default:
+			a.Log.Error(nil, "Got request with unknown openapi version", "req", lr)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 	}
 }
 
@@ -653,6 +699,7 @@ const (
 	RequestTypeResource        = "resource"
 	RequestTypeLegacyDiscovery = "legacy-discovery"
 	RequestTypeDiscovery       = "discovery"
+	RequestTypeOpenAPI         = "openapi"
 )
 
 type Request struct {
@@ -695,6 +742,15 @@ func ParseDiscoveryPath(parts []string, r *RequestWithBody) bool {
 		r.Type = RequestTypeDiscovery
 		r.Group = parts[0]
 		r.Version = parts[1]
+		return true
+	}
+	return false
+}
+
+func ParseOpenAPIPath(parts []string, r *RequestWithBody) bool {
+	if len(parts) == 1 {
+		r.Type = RequestTypeOpenAPI
+		r.Version = parts[0]
 		return true
 	}
 	return false
@@ -756,6 +812,7 @@ func ParseClusterAllResourcesPath(parts []string, r *RequestWithBody) bool {
 
 const LegacyPrefix = "api"
 const APIsPrefix = "apis"
+const OpenAPIPrefix = "openapi"
 
 func (a *API) ParseRequest(r *http.Request, lr LoggableRequest, req *RequestWithBody) (bool, error) {
 	// URL Structure:
@@ -766,7 +823,12 @@ func (a *API) ParseRequest(r *http.Request, lr LoggableRequest, req *RequestWith
 	parts := strings.Split(strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/"), "/"), "/")
 	a.Log.Info("Parsing URL parts", "req", lr, "parts", parts)
 
-	if parts[0] == LegacyPrefix && r.Method == http.MethodGet {
+	if parts[0] == OpenAPIPrefix && r.Method == http.MethodGet {
+		if ParseOpenAPIPath(parts[1:], req) {
+			return true, nil
+		}
+		return false, nil
+	} else if parts[0] == LegacyPrefix && r.Method == http.MethodGet {
 		if ParseLegacyDiscoveryPath(parts[1:], req) {
 			return true, nil
 		}
