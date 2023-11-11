@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 
 	"github.com/go-logr/logr"
@@ -59,47 +60,77 @@ type ObjectInfo[O client.Object, OList object.ObjectList[O]] interface {
 type NoopObjectInfo[O client.Object, OList client.ObjectList] struct {
 	namespaced bool
 	blank      O
-	blankList  noopObjectList[O, OList]
+	blankList  *noopObjectList[O, OList]
 	gvk        schema.GroupVersionKind
 	listGVK    schema.GroupVersionKind
 }
 
+type wrappedList interface {
+	unwrap() client.ObjectList
+	wrap(client.ObjectList)
+}
+
+var wrappedListType = reflect.TypeOf((*wrappedList)(nil)).Elem()
+
+// noopObjectList wraps a controller-runtime ObjectList with dummy methods
+// that panic so that it implements ksched's ObjectList interface.
+// This allows trivial wrapping of existing k8s types to be used from ksched's
+// API proxy without having to implement these methods.
+// This works because the extra methods that ksched requires are only used
+// if a type is mutated after being fetched, or if it can be fetched from an
+// archive. If an object is only ever fetched directly from k8s, verbatim,
+// these methods are never called.
 type noopObjectList[O client.Object, OList client.ObjectList] struct {
 	client.ObjectList
 }
 
-func (n noopObjectList[O, OList]) Reset(cap int) {
+var _ = wrappedList((*noopObjectList[client.Object, client.ObjectList])(nil))
+
+func (n *noopObjectList[O, OList]) Reset(cap int) {
 	panic("BUG: This should never be called")
 }
-func (n noopObjectList[O, OList]) Append(O) {
+func (n *noopObjectList[O, OList]) Append(O) {
 	panic("BUG: This should never be called")
 }
 
-func (n noopObjectList[O, OList]) AppendEmpty() O {
+func (n *noopObjectList[O, OList]) AppendEmpty() O {
 	panic("BUG: This should never be called")
 }
 
-func (n noopObjectList[O, OList]) For(func(int, O)) {
+func (n *noopObjectList[O, OList]) For(func(int, O)) {
 	panic("BUG: This should never be called")
+}
+
+func (n *noopObjectList[O, OList]) unwrap() client.ObjectList {
+	return n.ObjectList
+}
+func (n *noopObjectList[O, OList]) wrap(inner client.ObjectList) {
+	n.ObjectList = inner
+}
+func (n *noopObjectList[O, OList]) MarshalJSON() ([]byte, error) {
+	return json.Marshal(n.ObjectList)
+}
+func (n *noopObjectList[O, OList]) UnmarshalJSON(data []byte) error {
+	return json.Unmarshal(data, &n.ObjectList)
 }
 
 // NoopObjectInfoFor wraps a typical Object and ObjectList, e.g. *corev1.Pod and *corev1.PodList, with info that performs no mutations and has no archive
-func NoopObjectInfoFor[O client.Object, OList client.ObjectList](scheme *runtime.Scheme, blank O, blankList OList, namespaced bool) (ObjectInfo[O, noopObjectList[O, OList]], O, noopObjectList[O, OList], error) {
+func NoopObjectInfoFor[O client.Object, OList client.ObjectList](scheme *runtime.Scheme, blank O, blankList OList, namespaced bool) (ObjectInfo[O, *noopObjectList[O, OList]], O, *noopObjectList[O, OList], error) {
 	gvks, _, err := scheme.ObjectKinds(blank)
 	if err != nil {
-		return nil, blank, noopObjectList[O, OList]{}, err
+		return nil, blank, nil, err
 	}
 	if len(gvks) != 1 {
-		return nil, blank, noopObjectList[O, OList]{}, fmt.Errorf("Did not get exactly one GroupVersionKind")
+		return nil, blank, nil, fmt.Errorf("Did not get exactly one GroupVersionKind")
 	}
 	listGVKs, _, err := scheme.ObjectKinds(blankList)
 	if err != nil {
-		return nil, blank, noopObjectList[O, OList]{}, err
+		return nil, blank, nil, err
 	}
 	if len(listGVKs) != 1 {
-		return nil, blank, noopObjectList[O, OList]{}, fmt.Errorf("Did not get exactly one GroupVersionKind")
+		return nil, blank, nil, fmt.Errorf("Did not get exactly one GroupVersionKind")
 	}
-	noopBlankList := noopObjectList[O, OList]{ObjectList: blankList}
+	noopBlankList := &noopObjectList[O, OList]{ObjectList: blankList}
 	return &NoopObjectInfo[O, OList]{
 		namespaced: namespaced,
 		blank:      blank,
@@ -115,8 +146,8 @@ func (n *NoopObjectInfo[O, OList]) New() O {
 }
 
 // NewList returns a new object the TypeMeta set, and no objects
-func (n *NoopObjectInfo[O, OList]) NewList() noopObjectList[O, OList] {
-	return noopObjectList[O, OList]{ObjectList: n.blankList.DeepCopyObject().(OList)}
+func (n *NoopObjectInfo[O, OList]) NewList() *noopObjectList[O, OList] {
+	return &noopObjectList[O, OList]{ObjectList: n.blankList.DeepCopyObject().(OList)}
 }
 
 // MutateFromRead mutates an object that was read from the Kubernetes API
@@ -125,7 +156,7 @@ func (n *NoopObjectInfo[O, OList]) MutateFromRead(ctx context.Context, obj O) er
 }
 
 // MutateFromList mutates a list of objects listed from the Kubernetes API
-func (n *NoopObjectInfo[O, OList]) MutateFromList(ctx context.Context, objs noopObjectList[O, OList]) error {
+func (n *NoopObjectInfo[O, OList]) MutateFromList(ctx context.Context, objs *noopObjectList[O, OList]) error {
 	return nil
 }
 
@@ -150,8 +181,89 @@ func (n *NoopObjectInfo[O, OList]) ListGVK() schema.GroupVersionKind {
 }
 
 // Archive contains archived objects of this type. A return of nil means this kind does not have an archive.
-func (n *NoopObjectInfo[O, OList]) Archive() archive.Archiver[O, noopObjectList[O, OList]] {
+func (n *NoopObjectInfo[O, OList]) Archive() archive.Archiver[O, *noopObjectList[O, OList]] {
 	return nil
+}
+
+// ArchivedObjectInfo is a convenience wrapper for objects which are archived, but not mutated
+type ArchivedObjectInfo[O object.Object, OList object.ObjectList[O]] struct {
+	namespaced bool
+	blank      O
+	blankList  OList
+	gvk        schema.GroupVersionKind
+	listGVK    schema.GroupVersionKind
+	archive    archive.Archiver[O, OList]
+}
+
+// New returns a new object with the TypeMeta set, and all other values zero
+func (a *ArchivedObjectInfo[O, OList]) New() O {
+	return a.blank.DeepCopyObject().(O)
+}
+
+// NewList returns a new object the TypeMeta set, and no objects
+func (a *ArchivedObjectInfo[O, OList]) NewList() OList {
+	return a.blankList.DeepCopyObject().(OList)
+}
+
+// MutateFromRead mutates an object that was read from the Kubernetes API
+func (a *ArchivedObjectInfo[O, OList]) MutateFromRead(ctx context.Context, obj O) error {
+	return nil
+}
+
+// MutateFromList mutates a list of objects listed from the Kubernetes API
+func (a *ArchivedObjectInfo[O, OList]) MutateFromList(ctx context.Context, objs OList) error {
+	return nil
+}
+
+// MutateForWrite mutates an object to be created or updated in the Kubernetes API
+func (a *ArchivedObjectInfo[O, OList]) MutateForWrite(ctx context.Context, obj O) error {
+	return nil
+}
+
+// Namespaced returns true if this object is namespaced, false if it is cluster scoped
+func (a *ArchivedObjectInfo[O, OList]) Namespaced() bool {
+	return a.namespaced
+}
+
+// GVK returns the apiVersion and kind for this kind
+func (a *ArchivedObjectInfo[O, OList]) GVK() schema.GroupVersionKind {
+	return a.gvk
+}
+
+// ListGVK returns the apiVersion and kind for this kind's list kind
+func (a *ArchivedObjectInfo[O, OList]) ListGVK() schema.GroupVersionKind {
+	return a.listGVK
+}
+
+// Archive contains archived objects of this type. A return of nil means this kind does not have an archive.
+func (a *ArchivedObjectInfo[O, OList]) Archive() archive.Archiver[O, OList] {
+	return a.archive
+}
+
+// ArchivedObjectInfoFor wraps an object with info that performs no mutations but has an archive
+func ArchivedObjectInfoFor[O object.Object, OList object.ObjectList[O]](scheme *runtime.Scheme, blank O, blankList OList, namespaced bool, archive archive.Archiver[O, OList]) (ObjectInfo[O, OList], O, OList, error) {
+	gvks, _, err := scheme.ObjectKinds(blank)
+	if err != nil {
+		return nil, blank, blankList, err
+	}
+	if len(gvks) != 1 {
+		return nil, blank, blankList, fmt.Errorf("Did not get exactly one GroupVersionKind")
+	}
+	listGVKs, _, err := scheme.ObjectKinds(blankList)
+	if err != nil {
+		return nil, blank, blankList, err
+	}
+	if len(listGVKs) != 1 {
+		return nil, blank, blankList, fmt.Errorf("Did not get exactly one GroupVersionKind")
+	}
+	return &ArchivedObjectInfo[O, OList]{
+		namespaced: namespaced,
+		blank:      blank,
+		blankList:  blankList,
+		gvk:        gvks[0],
+		listGVK:    listGVKs[0],
+		archive:    archive,
+	}, blank, blankList, nil
 }
 
 // Config is the static configuration for the API
@@ -291,11 +403,23 @@ func (a *TypedAPI[O, OList]) List(ctx context.Context, req *RequestWithBody, lr 
 	var err error
 
 	objs := a.info.NewList()
-	err = a.K8s.List(ctx, objs, client.InNamespace(req.Namespace)) // TODO list options, TODO limit, continue
+	// Because k8s uses reflection instead of its own interface methods to look up type info, noopObjectList doesn't actually work
+	// To fix this, we have to unwrap it and obtain the underlying actual object list type
+	// Unfortunately, because go's type system isn't finished, we can't just use a type assertion, so we have to resort to reflection
+	listDest := client.ObjectList(objs)
+	objsV := reflect.ValueOf(objs)
+	isWrapped := objsV.Type().Implements(wrappedListType)
+	if isWrapped {
+		listDest = objsV.Interface().(wrappedList).unwrap()
+	}
+	err = a.K8s.List(ctx, listDest, client.InNamespace(req.Namespace)) // TODO list options, TODO limit, continue
 	if err != nil && !kerrors.IsNotFound(err) {
 		a.Log.Error(err, "Error listing objects from k8s", "req", lr)
 		handleK8sError(w, err)
 		return
+	}
+	if isWrapped {
+		objsV.Interface().(wrappedList).wrap(listDest)
 	}
 	archiver := a.info.Archive()
 	if archiver != nil {
@@ -483,6 +607,17 @@ func RegisterType[O client.Object, OList object.ObjectList[O]](a *API, urlKind s
 
 // ServeHTTP implements http.Handler.
 func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	defer func() {
+		r := recover()
+		err, isErr := r.(error)
+		if r != nil && isErr {
+			a.Log.Error(err, "HTTP request panicked")
+		} else if r != nil {
+			a.Log.Error(fmt.Errorf("%#v", err), "HTTP request panicked")
+		} else {
+			a.Log.Info("HTTP request completed")
+		}
+	}()
 	lr := LoggableRequest{
 		URL:    *r.URL,
 		Method: r.Method,
@@ -523,7 +658,7 @@ func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch req.Type {
-	case RequestTypeResource:
+	case RequestTypeResource, RequestTypeLegacyResource:
 		a.Log.Info("Parsed method/path/gvk", "req", lr, "parsed", req.Request)
 		roles, err := a.RBACPolicy.GetRoles(req.Token)
 		if err != nil {
@@ -616,6 +751,12 @@ func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				handleK8sError(w, err)
 				return
 			}
+			// The discovery client returns the legacy group (core/v1) as well as the new groups,
+			// but this endpoint is only meant to return the new groups.
+			// If this isn't removed, kubectl encounters a a duplicate kind error.
+			if groupList.Groups[0].Name == "" {
+				groupList.Groups = groupList.Groups[1:]
+			}
 			body = groupList
 		} else {
 			a.Log.Info("Performing API discovery", "req", lr, "parsed", req.Request)
@@ -697,9 +838,16 @@ type RequestType string
 
 const (
 	RequestTypeResource        = "resource"
-	RequestTypeLegacyDiscovery = "legacy-discovery"
 	RequestTypeDiscovery       = "discovery"
+	RequestTypeLegacyResource  = "legacy-resource"
+	RequestTypeLegacyDiscovery = "legacy-discovery"
 	RequestTypeOpenAPI         = "openapi"
+)
+
+const (
+	LegacyPrefix  = "api"
+	APIsPrefix    = "apis"
+	OpenAPIPrefix = "openapi"
 )
 
 type Request struct {
@@ -733,6 +881,60 @@ func ParseLegacyDiscoveryPath(parts []string, r *RequestWithBody) bool {
 	return false
 }
 
+func ParseLegacyNamespacedSingleResourcePath(parts []string, r *RequestWithBody) bool {
+	if len(parts) != 5 {
+		return false
+	}
+	if parts[1] != "namespaces" {
+		return false
+	}
+	r.Type = RequestTypeLegacyResource
+	r.Group = ""
+	r.Version = parts[0]
+	r.Namespace = parts[2]
+	r.Kind = parts[3]
+	r.Name = parts[4]
+	return true
+}
+
+func ParseLegacyClusterSingleResourcePath(parts []string, r *RequestWithBody) bool {
+	if len(parts) != 3 {
+		return false
+	}
+	r.Type = RequestTypeLegacyResource
+	r.Group = ""
+	r.Version = parts[0]
+	r.Kind = parts[1]
+	r.Name = parts[2]
+	return true
+}
+
+func ParseLegacyNamespacedAllResourcesPath(parts []string, r *RequestWithBody) bool {
+	if len(parts) != 4 {
+		return false
+	}
+	if parts[1] != "namespaces" {
+		return false
+	}
+	r.Type = RequestTypeLegacyResource
+	r.Group = ""
+	r.Version = parts[0]
+	r.Namespace = parts[2]
+	r.Kind = parts[3]
+	return true
+}
+
+func ParseLegacyClusterAllResourcesPath(parts []string, r *RequestWithBody) bool {
+	if len(parts) != 2 {
+		return false
+	}
+	r.Type = RequestTypeLegacyResource
+	r.Group = ""
+	r.Version = parts[0]
+	r.Kind = parts[1]
+	return true
+}
+
 func ParseDiscoveryPath(parts []string, r *RequestWithBody) bool {
 	if len(parts) == 0 {
 		r.Type = RequestTypeDiscovery
@@ -742,15 +944,6 @@ func ParseDiscoveryPath(parts []string, r *RequestWithBody) bool {
 		r.Type = RequestTypeDiscovery
 		r.Group = parts[0]
 		r.Version = parts[1]
-		return true
-	}
-	return false
-}
-
-func ParseOpenAPIPath(parts []string, r *RequestWithBody) bool {
-	if len(parts) == 1 {
-		r.Type = RequestTypeOpenAPI
-		r.Version = parts[0]
 		return true
 	}
 	return false
@@ -810,15 +1003,22 @@ func ParseClusterAllResourcesPath(parts []string, r *RequestWithBody) bool {
 	return true
 }
 
-const LegacyPrefix = "api"
-const APIsPrefix = "apis"
-const OpenAPIPrefix = "openapi"
+func ParseOpenAPIPath(parts []string, r *RequestWithBody) bool {
+	if len(parts) == 1 {
+		r.Type = RequestTypeOpenAPI
+		r.Version = parts[0]
+		return true
+	}
+	return false
+}
 
 func (a *API) ParseRequest(r *http.Request, lr LoggableRequest, req *RequestWithBody) (bool, error) {
 	// URL Structure:
-	// - {prefix}/api/{group}/{version}/[namespaces/{namespace}/]{kind}[/{name}]: Proxy access to k8s resources. Requires authoriziation.
-	// - {prefix}/apis[/...]: Proxy direct request to k8s for api info. No authorization required
-	// {namespace} is empty for cluster-scoped actions
+	// - {prefix}/openapi/{version}: OpenAPI discovery.
+	// - {prefix}/api/{version}: Legacy (core/v1) api discovery.
+	// - {prefix}/api/{version}/[namespaces/{namespace}/]{kind}[/{name}]: Proxy access to legacy (core/v1) k8s resources.
+	// - {prefix}/apis/{group}/{version}: API discovery.
+	// - {prefix}/apis/{group}/{version}/[namespaces/{namespace}/]{kind}[/{name}]: Proxy access to k8s resources.
 
 	parts := strings.Split(strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/"), "/"), "/")
 	a.Log.Info("Parsing URL parts", "req", lr, "parts", parts)
@@ -828,11 +1028,83 @@ func (a *API) ParseRequest(r *http.Request, lr LoggableRequest, req *RequestWith
 			return true, nil
 		}
 		return false, nil
-	} else if parts[0] == LegacyPrefix && r.Method == http.MethodGet {
-		if ParseLegacyDiscoveryPath(parts[1:], req) {
+	} else if parts[0] == LegacyPrefix {
+		switch r.Method {
+		case http.MethodHead:
+			// Checking permissions to single resource or listing all resources by type, used by UI
+			if ParseLegacyNamespacedSingleResourcePath(parts[1:], req) {
+				req.Verb = "get"
+			} else if ParseLegacyNamespacedAllResourcesPath(parts[1:], req) {
+				req.Verb = "list"
+			} else if ParseLegacyClusterSingleResourcePath(parts[1:], req) {
+				req.Verb = "get"
+			} else if ParseLegacyClusterAllResourcesPath(parts[1:], req) {
+				req.Verb = "list"
+			} else {
+				a.Log.Info("Can't parse HEAD as either single or all resources path", "req", lr)
+				return false, nil
+			}
+			req.DryRun = true
 			return true, nil
+		case http.MethodPost:
+			// Creating a resource
+			if !ParseLegacyNamespacedAllResourcesPath(parts[1:], req) {
+				a.Log.Info("Can't parse POST as all resources path", "req", lr)
+				return false, nil
+			}
+			req.Verb = "create"
+			req.Body = r.Body
+			return true, nil
+		case http.MethodGet:
+			// Either a reading single resource by name, or a list all of resource type
+			if ParseLegacyDiscoveryPath(parts[1:], req) {
+				// Discovery all apis or discovery group/version
+				return true, nil
+			} else if ParseLegacyNamespacedSingleResourcePath(parts[1:], req) {
+				// Get single namespaced object
+				req.Verb = "get"
+			} else if ParseLegacyNamespacedAllResourcesPath(parts[1:], req) {
+				// List all objects in namespace
+				req.Verb = "list"
+			} else if ParseLegacyClusterSingleResourcePath(parts[1:], req) {
+				// Get single cluster-scoped object
+				req.Verb = "get"
+			} else if ParseLegacyClusterAllResourcesPath(parts[1:], req) {
+				// List all objects in all namespaces
+				req.Verb = "list"
+			} else {
+				a.Log.Info("Can't parse GET as either single or multiple object path", "req", lr)
+				return false, nil
+			}
+			return true, nil
+		case http.MethodPut:
+			// Update a single resource by name
+			if !ParseLegacyNamespacedSingleResourcePath(parts[1:], req) {
+				a.Log.Info("Can't parse PUT as single resource path", "req", lr)
+				return false, nil
+			}
+			req.Verb = "update"
+			req.Body = r.Body
+			return true, nil
+		case http.MethodDelete:
+			// Either delete a single resource by name, or delete all resources in namespace
+			if ParseLegacyNamespacedSingleResourcePath(parts[1:], req) {
+				req.Verb = "delete"
+			} else if ParseLegacyNamespacedAllResourcesPath(parts[1:], req) {
+				req.Verb = "deletecollection"
+			} else if ParseLegacyNamespacedSingleResourcePath(parts[1:], req) {
+				req.Verb = "delete"
+			} else if ParseLegacyNamespacedAllResourcesPath(parts[1:], req) {
+				req.Verb = "deletecollection"
+			} else {
+				a.Log.Info("Can't parse DELETE as either single or multiple object path", "req", lr)
+				return false, nil
+			}
+			return true, nil
+		default:
+			a.Log.Info("Unknown method", "req", lr)
+			return false, nil
 		}
-		return false, nil
 	} else if parts[0] == APIsPrefix {
 		switch r.Method {
 		case http.MethodHead:
