@@ -1,21 +1,38 @@
 package api_test
 
 import (
+	"bytes"
+	"context"
 	_ "embed"
-	// . "github.com/onsi/ginkgo/v2"
-	// . "github.com/onsi/gomega"
-)
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"text/template"
 
-/*
+	"github.com/golang-jwt/jwt/v4"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/meln5674/gotoken"
+
+	ev1a1 "github.com/meln5674/ksched/internal/testing/v1alpha1"
+	ksched "github.com/meln5674/ksched/pkg/api"
+	"github.com/meln5674/ksched/pkg/archive"
+	"github.com/meln5674/ksched/pkg/object"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+)
 
 var _ = Describe("Api", func() {
 
 	var test testCase
 
 	BeforeEach(func(ctx context.Context) {
-		store.SBOM = make(map[string]report.SBOM, 0)
-		store.VulnerabilityReport = make(map[string]report.VulnerabilityReport, 0)
-		archive.Objects = make(map[string]map[string]*akv1a1.Scan, 0)
+		exampleArchive.Objects = make(map[string]map[string]*ev1a1.Example, 0)
 		test = testCase{}
 	})
 
@@ -31,7 +48,7 @@ var _ = Describe("Api", func() {
 	When("No token is present", func() {
 		BeforeEach(func() {
 			test.method = http.MethodGet
-			test.path = "/prefix/"
+			test.path = "/prefix/apis/"
 			test.token = noToken()
 			test.code = http.StatusUnauthorized
 		})
@@ -40,7 +57,7 @@ var _ = Describe("Api", func() {
 	When("An invalid token is present", func() {
 		BeforeEach(func() {
 			test.method = http.MethodGet
-			test.path = "/prefix/"
+			test.path = "/prefix/apis/"
 			test.token = invalidToken()
 			test.code = http.StatusUnauthorized
 		})
@@ -50,47 +67,47 @@ var _ = Describe("Api", func() {
 		BeforeEach(func() {
 			test.token = validToken(map[string]interface{}{})
 		})
-		When("Creating a scan", func() {
+		When("Creating a example", func() {
 			BeforeEach(func() {
 				test.method = http.MethodPost
-				test.body = bodyFor(scanNoReports.DeepCopy())
+				test.body = bodyFor(exampleNoData.DeepCopy())
 			})
 			When("The namespace is blank", func() {
 				BeforeEach(func() {
-					test.path = "/prefix/ankyra.meln5674.github.com/v1alpha1/scans"
+					test.path = "/prefix/apis/ksched-internal-testing.meln5674.github.com/v1alpha1/examples"
 					test.code = http.StatusNotFound
 				})
 				It("Should reject as not found", func(ctx context.Context) { runCase(ctx) })
 			})
 			When("The namespace is set", func() {
 				BeforeEach(func() {
-					test.path = "/prefix/ankyra.meln5674.github.com/v1alpha1/namespaces/default/scans"
+					test.path = "/prefix/apis/ksched-internal-testing.meln5674.github.com/v1alpha1/namespaces/default/examples"
 				})
-				When("The user does not have permission to create a scan in that namespace", func() {
+				When("The user does not have permission to create a example in that namespace", func() {
 					BeforeEach(func() {
 						test.code = http.StatusForbidden
 					})
 					It("Should reject as forbidden", func(ctx context.Context) { runCase(ctx) })
 				})
-				When("The user has permission to create a scan in that namespace", func() {
+				When("The user has permission to create a example in that namespace", func() {
 					BeforeEach(func() {
 						test.policy = namespacedCreatePermissions
 					})
-					When("That scan already exists", func() {
+					When("That example already exists", func() {
 						BeforeEach(func(ctx context.Context) {
-							k8sObject(ctx, scanNoReports.DeepCopy())
+							k8sObject(ctx, exampleNoData.DeepCopy())
 							test.code = http.StatusConflict
 						})
 						It("Should reject as a conflict", func(ctx context.Context) { runCase(ctx) })
 					})
-					When("That scan doesn't exist", func() {
+					When("That example doesn't exist", func() {
 						When("The metadata doesn't match", func() {
 							BeforeEach(func() {
 								test.policy = namespacedCreatePermissionsTwoNamespaces
 								test.code = http.StatusBadRequest
-								scan := scanNoReports.DeepCopy()
-								scan.Namespace = "not-default"
-								test.body = bodyFor(scan)
+								example := exampleNoData.DeepCopy()
+								example.Namespace = "not-default"
+								test.body = bodyFor(example)
 							})
 							It("Should reject as a bad request", func(ctx context.Context) { runCase(ctx) })
 						})
@@ -99,13 +116,13 @@ var _ = Describe("Api", func() {
 								test.code = http.StatusOK
 							})
 							It("Should succeed and be visible directly from kubernetes", func(ctx context.Context) {
-								scan := scanNoReports.DeepCopy()
+								example := exampleNoData.DeepCopy()
 								runCase(ctx)
-								expectObjectInK8s(ctx, new(akv1a1.Scan), scan)
+								expectObjectInK8s(ctx, new(ev1a1.Example), example)
 								DeferCleanup(func(ctx context.Context) {
-									Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, scan))).To(Succeed())
-									Eventually(func() error { return k8sClient.Get(ctx, client.ObjectKeyFromObject(scan), scan) }, "5s").ShouldNot(Succeed())
-									ctrl.Log.WithName("tests").Info("Removed from K8s", "type", scan.GetObjectKind().GroupVersionKind(), "key", client.ObjectKeyFromObject(scan))
+									Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, example))).To(Succeed())
+									Eventually(func() error { return k8sClient.Get(ctx, client.ObjectKeyFromObject(example), example) }, "5s").ShouldNot(Succeed())
+									ctrl.Log.WithName("tests").Info("Removed from K8s", "type", example.GetObjectKind().GroupVersionKind(), "key", client.ObjectKeyFromObject(example))
 								})
 							})
 						})
@@ -113,13 +130,13 @@ var _ = Describe("Api", func() {
 				})
 			})
 		})
-		When("Listing scans", func() {
+		When("Listing examples", func() {
 			BeforeEach(func() {
 				test.method = http.MethodGet
 			})
 			When("The namespace is blank", func() {
 				BeforeEach(func() {
-					test.path = "/prefix/ankyra.meln5674.github.com/v1alpha1/scans"
+					test.path = "/prefix/apis/ksched-internal-testing.meln5674.github.com/v1alpha1/examples"
 				})
 				When("The user does not have permission to list at cluster scope", func() {
 					BeforeEach(func() {
@@ -128,115 +145,62 @@ var _ = Describe("Api", func() {
 					It("Should reject as forbidden", func(ctx context.Context) { runCase(ctx) })
 				})
 				When("The user has permission to list at cluster scope", func() {
-					var scanSyftReportFilled, scanGrypeReportFilled, scanBothReportsFilled *akv1a1.Scan
+					var exampleWithDataFilled *ev1a1.Example
 					BeforeEach(func() {
 						test.policy = clusterGetPermissions
 
 						test.policy = clusterGetPermissions
-						scanSyftReportFilled = setReports(scanSyftReport.DeepCopy(), "foo", testSyftReportBytes, nil)
-						scanSyftReportFilled.Namespace = "default-1"
-						scanGrypeReportFilled = setReports(scanGrypeReport.DeepCopy(), "foo", nil, testGrypeReportBytes)
-						scanGrypeReportFilled.Namespace = "default-2"
-						scanBothReportsFilled = setReports(scanBothReports.DeepCopy(), "foo", testSyftReportBytes, testGrypeReportBytes)
-						scanBothReportsFilled.Namespace = "default-3"
-
-						store.SBOM["syft-report-id"] = report.SBOM{SBOM: testSyftReport}
-						store.VulnerabilityReport["grype-report-id"] = report.VulnerabilityReport{Report: testGrypeReport}
+						exampleWithDataFilled = setMutatedData(exampleWithData.DeepCopy(), mutatedData)
+						exampleWithDataFilled.Namespace = "default-1"
 					})
 
-					When("There are no scans in kubernetes or the archive", func() {
+					When("There are no examples in kubernetes or the archive", func() {
 						BeforeEach(func() {
 							test.code = http.StatusOK
 							test.withBody = func(body io.Reader) {
-								expectObjectList(body, new(akv1a1.Scan), &akv1a1.ScanList{}, getListScans, []akv1a1.Scan{}, []akv1a1.Scan{})
+								expectObjectList(body, new(ev1a1.Example), &ev1a1.ExampleList{}, getListScans, []ev1a1.Example{}, []ev1a1.Example{})
 							}
 						})
 						It("Should return an empty list", func(ctx context.Context) { runCase(ctx) })
 					})
-					When("There are scans in kubernetes but not the archive", func() {
+					When("There are examples in kubernetes but not the archive", func() {
 						BeforeEach(func(ctx context.Context) {
 							var obj client.Object
-							obj = scanNoReports.DeepCopy()
+							obj = exampleNoData.DeepCopy()
 							k8sObject(ctx, obj)
-							obj = scanSyftReport.DeepCopy()
+							obj = exampleWithData.DeepCopy()
 							obj.SetNamespace("default-1")
-							k8sObject(ctx, obj)
-							obj = scanGrypeReport.DeepCopy()
-							obj.SetNamespace("default-2")
-							k8sObject(ctx, obj)
-							obj = scanBothReports.DeepCopy()
-							obj.SetNamespace("default-3")
 							k8sObject(ctx, obj)
 							test.code = http.StatusOK
 							test.withBody = func(body io.Reader) {
-								expectObjectList(body, new(akv1a1.Scan), new(akv1a1.ScanList), getListScans,
-									[]akv1a1.Scan{
-										*scanNoReports,
-										*scanSyftReportFilled,
-										*scanGrypeReportFilled,
-										*scanBothReportsFilled,
+								expectObjectList(body, new(ev1a1.Example), new(ev1a1.ExampleList), getListScans,
+									[]ev1a1.Example{
+										*exampleNoData,
+										*exampleWithDataFilled,
 									},
-									[]akv1a1.Scan{},
-								)
-							}
-						})
-						It("Should return them with their reports", func(ctx context.Context) { runCase(ctx) })
-					})
-					When("There are scans in the archive, but not kubernetes", func() {
-						BeforeEach(func(ctx context.Context) {
-
-							var obj *akv1a1.Scan
-							obj = scanNoReports.DeepCopy()
-							archiveObject[*akv1a1.Scan, *akv1a1.ScanList](ctx, archive, obj)
-							obj = scanSyftReport.DeepCopy()
-							obj.SetNamespace("default-1")
-							archiveObject[*akv1a1.Scan, *akv1a1.ScanList](ctx, archive, obj)
-							obj = scanGrypeReport.DeepCopy()
-							obj.SetNamespace("default-2")
-							archiveObject[*akv1a1.Scan, *akv1a1.ScanList](ctx, archive, obj)
-							obj = scanBothReports.DeepCopy()
-							obj.SetNamespace("default-3")
-							archiveObject[*akv1a1.Scan, *akv1a1.ScanList](ctx, archive, obj)
-							test.code = http.StatusOK
-							test.withBody = func(body io.Reader) {
-								expectObjectList(body, new(akv1a1.Scan), new(akv1a1.ScanList), getListScans,
-									[]akv1a1.Scan{
-										*scanNoReports,
-										*scanSyftReportFilled,
-										*scanGrypeReportFilled,
-										*scanBothReportsFilled,
-									},
-									[]akv1a1.Scan{},
+									[]ev1a1.Example{},
 								)
 							}
 						})
 						It("Should return them with their reports", func(ctx context.Context) { runCase(ctx) })
 
 					})
-					When("There are scans in both kubernetes and the archive", func() {
+					When("There are examples in both kubernetes and the archive", func() {
 						BeforeEach(func(ctx context.Context) {
-							var obj *akv1a1.Scan
-							obj = scanNoReports.DeepCopy()
+							var obj *ev1a1.Example
+							obj = exampleNoData.DeepCopy()
 							k8sObject(ctx, obj)
-							obj = scanSyftReport.DeepCopy()
+							obj = exampleWithData.DeepCopy()
 							obj.SetNamespace("default-1")
 							k8sObject(ctx, obj)
-							obj = scanGrypeReport.DeepCopy()
-							obj.SetNamespace("default-2")
-							archiveObject[*akv1a1.Scan, *akv1a1.ScanList](ctx, archive, obj)
-							obj = scanBothReports.DeepCopy()
-							obj.SetNamespace("default-3")
-							archiveObject[*akv1a1.Scan, *akv1a1.ScanList](ctx, archive, obj)
 							test.code = http.StatusOK
 							test.withBody = func(body io.Reader) {
-								expectObjectList(body, new(akv1a1.Scan), new(akv1a1.ScanList), getListScans,
-									[]akv1a1.Scan{
-										*scanNoReports,
-										*scanSyftReportFilled,
-										*scanGrypeReportFilled,
-										*scanBothReportsFilled,
+								expectObjectList(body, new(ev1a1.Example), new(ev1a1.ExampleList), getListScans,
+									[]ev1a1.Example{
+										*exampleNoData,
+										*exampleWithDataFilled,
 									},
-									[]akv1a1.Scan{},
+									[]ev1a1.Example{},
 								)
 							}
 						})
@@ -245,15 +209,10 @@ var _ = Describe("Api", func() {
 				})
 			})
 			When("The namespace is set", func() {
-				var scanSyftReportFilled, scanGrypeReportFilled, scanBothReportsFilled *akv1a1.Scan
+				var exampleWithDataFilled *ev1a1.Example
 				BeforeEach(func() {
-					test.path = "/prefix/ankyra.meln5674.github.com/v1alpha1/namespaces/default/scans"
-					scanSyftReportFilled = setReports(scanSyftReport.DeepCopy(), "foo", testSyftReportBytes, nil)
-					scanGrypeReportFilled = setReports(scanGrypeReport.DeepCopy(), "foo", nil, testGrypeReportBytes)
-					scanBothReportsFilled = setReports(scanBothReports.DeepCopy(), "foo", testSyftReportBytes, testGrypeReportBytes)
-
-					store.SBOM["syft-report-id"] = report.SBOM{SBOM: testSyftReport}
-					store.VulnerabilityReport["grype-report-id"] = report.VulnerabilityReport{Report: testGrypeReport}
+					test.path = "/prefix/apis/ksched-internal-testing.meln5674.github.com/v1alpha1/namespaces/default/examples"
+					exampleWithDataFilled = setMutatedData(exampleWithData.DeepCopy(), mutatedData)
 				})
 
 				When("The user does not have permission to list in any namespace", func() {
@@ -274,69 +233,57 @@ var _ = Describe("Api", func() {
 						test.policy = namespacedGetPermissions
 						test.code = http.StatusOK
 					})
-					When("There are no scans in kubernetes or the archive", func() {
+					When("There are no examples in kubernetes or the archive", func() {
 						BeforeEach(func() {
 							test.withBody = func(body io.Reader) {
-								expectObjectList(body, new(akv1a1.Scan), new(akv1a1.ScanList), getListScans, []akv1a1.Scan{}, []akv1a1.Scan{})
+								expectObjectList(body, new(ev1a1.Example), new(ev1a1.ExampleList), getListScans, []ev1a1.Example{}, []ev1a1.Example{})
 							}
 						})
 						It("Should return an empty list", func(ctx context.Context) { runCase(ctx) })
 					})
-					When("There are scans in kubernetes but not the archive", func() {
+					When("There are examples in kubernetes but not the archive", func() {
 						BeforeEach(func(ctx context.Context) {
-							k8sObject(ctx, scanNoReports.DeepCopy())
-							k8sObject(ctx, scanSyftReport.DeepCopy())
-							k8sObject(ctx, scanGrypeReport.DeepCopy())
-							k8sObject(ctx, scanBothReports.DeepCopy())
-							k8sObject(ctx, scanWrongNamespace.DeepCopy())
+							k8sObject(ctx, exampleNoData.DeepCopy())
+							k8sObject(ctx, exampleWithData.DeepCopy())
+							k8sObject(ctx, exampleWrongNamespace.DeepCopy())
 							test.withBody = func(body io.Reader) {
-								expectObjectList(body, new(akv1a1.Scan), new(akv1a1.ScanList), getListScans, []akv1a1.Scan{
-									*scanNoReports,
-									*scanSyftReportFilled,
-									*scanGrypeReportFilled,
-									*scanBothReportsFilled,
-								}, []akv1a1.Scan{
-									*scanWrongNamespace,
+								expectObjectList(body, new(ev1a1.Example), new(ev1a1.ExampleList), getListScans, []ev1a1.Example{
+									*exampleNoData,
+									*exampleWithDataFilled,
+								}, []ev1a1.Example{
+									*exampleWrongNamespace,
 								})
 							}
 						})
 						It("Should return them with their reports", func(ctx context.Context) { runCase(ctx) })
 					})
-					When("There are scans in the archive, but not kubernetes", func() {
+					When("There are examples in the archive, but not kubernetes", func() {
 						BeforeEach(func(ctx context.Context) {
-							archiveObject[*akv1a1.Scan, *akv1a1.ScanList](ctx, archive, scanNoReports)
-							archiveObject[*akv1a1.Scan, *akv1a1.ScanList](ctx, archive, scanSyftReport)
-							archiveObject[*akv1a1.Scan, *akv1a1.ScanList](ctx, archive, scanGrypeReport)
-							archiveObject[*akv1a1.Scan, *akv1a1.ScanList](ctx, archive, scanBothReports)
-							archiveObject[*akv1a1.Scan, *akv1a1.ScanList](ctx, archive, scanWrongNamespace)
+							archiveObject[*ev1a1.Example, *ev1a1.ExampleList](ctx, exampleArchive, exampleNoData)
+							archiveObject[*ev1a1.Example, *ev1a1.ExampleList](ctx, exampleArchive, exampleWithData)
+							archiveObject[*ev1a1.Example, *ev1a1.ExampleList](ctx, exampleArchive, exampleWrongNamespace)
 							test.withBody = func(body io.Reader) {
-								expectObjectList(body, new(akv1a1.Scan), new(akv1a1.ScanList), getListScans, []akv1a1.Scan{
-									*scanNoReports,
-									*scanSyftReportFilled,
-									*scanGrypeReportFilled,
-									*scanBothReportsFilled,
-								}, []akv1a1.Scan{
-									*scanWrongNamespace,
+								expectObjectList(body, new(ev1a1.Example), new(ev1a1.ExampleList), getListScans, []ev1a1.Example{
+									*exampleNoData,
+									*exampleWithDataFilled,
+								}, []ev1a1.Example{
+									*exampleWrongNamespace,
 								})
 							}
 						})
 						It("Should return them with their reports", func(ctx context.Context) { runCase(ctx) })
 					})
-					When("There are scans in both kubernetes and the archive", func() {
+					When("There are examples in both kubernetes and the archive", func() {
 						BeforeEach(func(ctx context.Context) {
-							k8sObject(ctx, scanNoReports.DeepCopy())
-							k8sObject(ctx, scanSyftReport.DeepCopy())
-							archiveObject[*akv1a1.Scan, *akv1a1.ScanList](ctx, archive, scanGrypeReport)
-							archiveObject[*akv1a1.Scan, *akv1a1.ScanList](ctx, archive, scanBothReports)
-							archiveObject[*akv1a1.Scan, *akv1a1.ScanList](ctx, archive, scanWrongNamespace)
+							k8sObject(ctx, exampleNoData.DeepCopy())
+							k8sObject(ctx, exampleWithData.DeepCopy())
+							archiveObject[*ev1a1.Example, *ev1a1.ExampleList](ctx, exampleArchive, exampleWrongNamespace)
 							test.withBody = func(body io.Reader) {
-								expectObjectList(body, new(akv1a1.Scan), new(akv1a1.ScanList), getListScans, []akv1a1.Scan{
-									*scanNoReports,
-									*scanSyftReportFilled,
-									*scanGrypeReportFilled,
-									*scanBothReportsFilled,
-								}, []akv1a1.Scan{
-									*scanWrongNamespace,
+								expectObjectList(body, new(ev1a1.Example), new(ev1a1.ExampleList), getListScans, []ev1a1.Example{
+									*exampleNoData,
+									*exampleWithDataFilled,
+								}, []ev1a1.Example{
+									*exampleWrongNamespace,
 								})
 							}
 						})
@@ -349,69 +296,57 @@ var _ = Describe("Api", func() {
 						test.policy = clusterGetPermissions
 						test.code = http.StatusOK
 					})
-					When("There are no scans in kubernetes or the archive", func() {
+					When("There are no examples in kubernetes or the archive", func() {
 						BeforeEach(func() {
 							test.withBody = func(body io.Reader) {
-								expectObjectList(body, new(akv1a1.Scan), new(akv1a1.ScanList), getListScans, []akv1a1.Scan{}, []akv1a1.Scan{})
+								expectObjectList(body, new(ev1a1.Example), new(ev1a1.ExampleList), getListScans, []ev1a1.Example{}, []ev1a1.Example{})
 							}
 						})
 						It("Should return an empty list", func(ctx context.Context) { runCase(ctx) })
 					})
-					When("There are scans in kubernetes but not the archive", func() {
+					When("There are examples in kubernetes but not the archive", func() {
 						BeforeEach(func(ctx context.Context) {
-							k8sObject(ctx, scanNoReports.DeepCopy())
-							k8sObject(ctx, scanSyftReport.DeepCopy())
-							k8sObject(ctx, scanGrypeReport.DeepCopy())
-							k8sObject(ctx, scanBothReports.DeepCopy())
-							k8sObject(ctx, scanWrongNamespace.DeepCopy())
+							k8sObject(ctx, exampleNoData.DeepCopy())
+							k8sObject(ctx, exampleWithData.DeepCopy())
+							k8sObject(ctx, exampleWrongNamespace.DeepCopy())
 							test.withBody = func(body io.Reader) {
-								expectObjectList(body, new(akv1a1.Scan), new(akv1a1.ScanList), getListScans, []akv1a1.Scan{
-									*scanNoReports,
-									*scanSyftReportFilled,
-									*scanGrypeReportFilled,
-									*scanBothReportsFilled,
-								}, []akv1a1.Scan{
-									*scanWrongNamespace,
+								expectObjectList(body, new(ev1a1.Example), new(ev1a1.ExampleList), getListScans, []ev1a1.Example{
+									*exampleNoData,
+									*exampleWithDataFilled,
+								}, []ev1a1.Example{
+									*exampleWrongNamespace,
 								})
 							}
 						})
 						It("Should return them with their reports", func(ctx context.Context) { runCase(ctx) })
 					})
-					When("There are scans in the archive, but not kubernetes", func() {
+					When("There are examples in the archive, but not kubernetes", func() {
 						BeforeEach(func(ctx context.Context) {
-							archiveObject[*akv1a1.Scan, *akv1a1.ScanList](ctx, archive, scanNoReports)
-							archiveObject[*akv1a1.Scan, *akv1a1.ScanList](ctx, archive, scanSyftReport)
-							archiveObject[*akv1a1.Scan, *akv1a1.ScanList](ctx, archive, scanGrypeReport)
-							archiveObject[*akv1a1.Scan, *akv1a1.ScanList](ctx, archive, scanBothReports)
-							archiveObject[*akv1a1.Scan, *akv1a1.ScanList](ctx, archive, scanWrongNamespace)
+							archiveObject[*ev1a1.Example, *ev1a1.ExampleList](ctx, exampleArchive, exampleNoData)
+							archiveObject[*ev1a1.Example, *ev1a1.ExampleList](ctx, exampleArchive, exampleWithData)
+							archiveObject[*ev1a1.Example, *ev1a1.ExampleList](ctx, exampleArchive, exampleWrongNamespace)
 							test.withBody = func(body io.Reader) {
-								expectObjectList(body, new(akv1a1.Scan), new(akv1a1.ScanList), getListScans, []akv1a1.Scan{
-									*scanNoReports,
-									*scanSyftReportFilled,
-									*scanGrypeReportFilled,
-									*scanBothReportsFilled,
-								}, []akv1a1.Scan{
-									*scanWrongNamespace,
+								expectObjectList(body, new(ev1a1.Example), new(ev1a1.ExampleList), getListScans, []ev1a1.Example{
+									*exampleNoData,
+									*exampleWithDataFilled,
+								}, []ev1a1.Example{
+									*exampleWrongNamespace,
 								})
 							}
 						})
 						It("Should return them with their reports", func(ctx context.Context) { runCase(ctx) })
 					})
-					When("There are scans in both kubernetes and the archive", func() {
+					When("There are examples in both kubernetes and the archive", func() {
 						BeforeEach(func(ctx context.Context) {
-							k8sObject(ctx, scanNoReports.DeepCopy())
-							k8sObject(ctx, scanSyftReport.DeepCopy())
-							archiveObject[*akv1a1.Scan, *akv1a1.ScanList](ctx, archive, scanGrypeReport)
-							archiveObject[*akv1a1.Scan, *akv1a1.ScanList](ctx, archive, scanBothReports)
-							archiveObject[*akv1a1.Scan, *akv1a1.ScanList](ctx, archive, scanWrongNamespace)
+							k8sObject(ctx, exampleNoData.DeepCopy())
+							k8sObject(ctx, exampleWithData.DeepCopy())
+							archiveObject[*ev1a1.Example, *ev1a1.ExampleList](ctx, exampleArchive, exampleWrongNamespace)
 							test.withBody = func(body io.Reader) {
-								expectObjectList(body, new(akv1a1.Scan), new(akv1a1.ScanList), getListScans, []akv1a1.Scan{
-									*scanNoReports,
-									*scanSyftReportFilled,
-									*scanGrypeReportFilled,
-									*scanBothReportsFilled,
-								}, []akv1a1.Scan{
-									*scanWrongNamespace,
+								expectObjectList(body, new(ev1a1.Example), new(ev1a1.ExampleList), getListScans, []ev1a1.Example{
+									*exampleNoData,
+									*exampleWithDataFilled,
+								}, []ev1a1.Example{
+									*exampleWrongNamespace,
 								})
 							}
 						})
@@ -421,32 +356,35 @@ var _ = Describe("Api", func() {
 				})
 			})
 		})
-		When("Getting a scan", func() {
+		When("Getting a example", func() {
 			BeforeEach(func() {
 				test.method = http.MethodGet
 			})
 			When("The namespace is blank", func() {
 				BeforeEach(func(ctx context.Context) {
-					k8sObject(ctx, scanNoReports.DeepCopy())
-					test.path = "/prefix/ankyra.meln5674.github.com/v1alpha1/namespaces/scans/no-reports"
-					test.policy = clusterGetPermissions
-					test.code = http.StatusNotFound
+					k8sObject(ctx, exampleNoData.DeepCopy())
+					test.path = "/prefix/apis/ksched-internal-testing.meln5674.github.com/v1alpha1/examples/no-reports"
 				})
-				It("Should reject as not found", func(ctx context.Context) { runCase(ctx) })
+				When("The user does not have permission to list at cluster scope", func() {
+					BeforeEach(func() {
+						test.code = http.StatusForbidden
+					})
+					It("Should reject as forbidden", func(ctx context.Context) { runCase(ctx) })
+				})
+				When("The user has permission to list at cluster scope", func() {
+					BeforeEach(func() {
+						test.policy = clusterGetPermissions
+						test.code = http.StatusNotFound
+					})
+					It("Should reject as not found", func(ctx context.Context) { runCase(ctx) })
+				})
 			})
 			When("The namespace is set", func() {
-				var scanSyftReportFilled, scanGrypeReportFilled, scanBothReportsFilled *akv1a1.Scan
+				var exampleWithDataFilled *ev1a1.Example
 				BeforeEach(func() {
-					test.path = "/prefix/ankyra.meln5674.github.com/v1alpha1/namespaces/default/scans/test"
-					scanSyftReportFilled = setReports(scanSyftReport.DeepCopy(), "foo", testSyftReportBytes, nil)
-					scanSyftReportFilled.Name = "test"
-					scanGrypeReportFilled = setReports(scanGrypeReport.DeepCopy(), "foo", nil, testGrypeReportBytes)
-					scanGrypeReportFilled.Name = "test"
-					scanBothReportsFilled = setReports(scanBothReports.DeepCopy(), "foo", testSyftReportBytes, testGrypeReportBytes)
-					scanBothReportsFilled.Name = "test"
-
-					store.SBOM["syft-report-id"] = report.SBOM{SBOM: testSyftReport}
-					store.VulnerabilityReport["grype-report-id"] = report.VulnerabilityReport{Report: testGrypeReport}
+					test.path = "/prefix/apis/ksched-internal-testing.meln5674.github.com/v1alpha1/namespaces/default/examples/test"
+					exampleWithDataFilled = setMutatedData(exampleWithData.DeepCopy(), mutatedData)
+					exampleWithDataFilled.Name = "test"
 				})
 
 				When("The user does not have permission to get in any namespace", func() {
@@ -464,133 +402,89 @@ var _ = Describe("Api", func() {
 					It("Should reject as forbidden", func(ctx context.Context) { runCase(ctx) })
 				})
 				When("The user has permission to get in that namespace", func() {
-					var scan *akv1a1.Scan
+					var example *ev1a1.Example
 					BeforeEach(func() {
 						test.policy = namespacedGetPermissions
 					})
-					When("The scan is not in kubernetes or the archive", func() {
+					When("The example is not in kubernetes or the archive", func() {
 						BeforeEach(func() {
 							test.code = http.StatusNotFound
 						})
 						It("Should reject as not found", func(ctx context.Context) { runCase(ctx) })
 					})
-					When("There scan is in kubernetes but not the archive", func() {
+					When("There example is in kubernetes but not the archive", func() {
 						BeforeEach(func() {
 							test.code = http.StatusOK
 						})
-						When("The scan has no reports", func() {
+						When("The example has no reports", func() {
 							BeforeEach(func(ctx context.Context) {
-								ctrl.Log.WithName("tests").Info("expected", "expected", scanNoReports)
-								scan = scanNoReports.DeepCopy()
-								scan.Name = "test"
-								k8sObject(ctx, scan)
-								expected := scanNoReports.DeepCopy()
-								expected.Name = scan.Name
+								ctrl.Log.WithName("tests").Info("expected", "expected", exampleNoData)
+								example = exampleNoData.DeepCopy()
+								example.Name = "test"
+								k8sObject(ctx, example)
+								expected := exampleNoData.DeepCopy()
+								expected.Name = example.Name
 								test.withBody = func(body io.Reader) {
 									expectObject(body, expected)
 								}
 							})
 							It("Should return it as-is", func(ctx context.Context) { runCase(ctx) })
 						})
-						When("The scan has a syft report", func() {
+						When("The example has a syft report", func() {
 							BeforeEach(func(ctx context.Context) {
-								scan = scanSyftReport.DeepCopy()
-								scan.Name = "test"
-								k8sObject(ctx, scan)
+								example = exampleWithData.DeepCopy()
+								example.Name = "test"
+								k8sObject(ctx, example)
 								test.withBody = func(body io.Reader) {
-									expectObject(body, scanSyftReportFilled)
-								}
-							})
-							It("Should return it with the report", func(ctx context.Context) { runCase(ctx) })
-						})
-						When("The scan has a grype report", func() {
-							BeforeEach(func(ctx context.Context) {
-								scan = scanGrypeReport.DeepCopy()
-								scan.Name = "test"
-								k8sObject(ctx, scan)
-								test.withBody = func(body io.Reader) {
-									expectObject(body, scanGrypeReportFilled)
-								}
-							})
-							It("Should return it with the report", func(ctx context.Context) { runCase(ctx) })
-						})
-						When("The scan has both reports", func() {
-							BeforeEach(func(ctx context.Context) {
-								scan = scanBothReports.DeepCopy()
-								scan.Name = "test"
-								k8sObject(ctx, scan)
-								test.withBody = func(body io.Reader) {
-									expectObject(body, scanBothReportsFilled)
+									expectObject(body, exampleWithDataFilled)
 								}
 							})
 							It("Should return it with the report", func(ctx context.Context) { runCase(ctx) })
 						})
 					})
-					When("The scans is in the archive but not in kubernetes", func() {
+					When("The example is in the archive but not in kubernetes", func() {
 						BeforeEach(func() {
 							test.code = http.StatusOK
 						})
-						When("The scan has no reports", func() {
+						When("The example has no reports", func() {
 							BeforeEach(func(ctx context.Context) {
-								scan = scanNoReports.DeepCopy()
-								scan.Name = "test"
-								archiveObject[*akv1a1.Scan, *akv1a1.ScanList](ctx, archive, scan)
+								example = exampleNoData.DeepCopy()
+								example.Name = "test"
+								archiveObject[*ev1a1.Example, *ev1a1.ExampleList](ctx, exampleArchive, example)
 								test.withBody = func(body io.Reader) {
-									expectObject(body, scan)
+									expectObject(body, example)
 								}
 							})
 							It("Should return it as-is", func(ctx context.Context) { runCase(ctx) })
 						})
-						When("The scan has a syft report", func() {
+						When("The example has a syft report", func() {
 							BeforeEach(func(ctx context.Context) {
-								scan = scanSyftReport.DeepCopy()
-								scan.Name = "test"
-								archiveObject[*akv1a1.Scan, *akv1a1.ScanList](ctx, archive, scan)
+								example = exampleWithData.DeepCopy()
+								example.Name = "test"
+								archiveObject[*ev1a1.Example, *ev1a1.ExampleList](ctx, exampleArchive, example)
 								test.withBody = func(body io.Reader) {
-									expectObject(body, scanSyftReportFilled)
-								}
-							})
-							It("Should return it with the report", func(ctx context.Context) { runCase(ctx) })
-						})
-						When("The scan has a grype report", func() {
-							BeforeEach(func(ctx context.Context) {
-								scan = scanGrypeReport.DeepCopy()
-								scan.Name = "test"
-								archiveObject[*akv1a1.Scan, *akv1a1.ScanList](ctx, archive, scan)
-								test.withBody = func(body io.Reader) {
-									expectObject(body, scanGrypeReportFilled)
-								}
-							})
-							It("Should return it with the report", func(ctx context.Context) { runCase(ctx) })
-						})
-						When("The scan has both reports", func() {
-							BeforeEach(func(ctx context.Context) {
-								scan = scanBothReports.DeepCopy()
-								scan.Name = "test"
-								archiveObject[*akv1a1.Scan, *akv1a1.ScanList](ctx, archive, scan)
-								test.withBody = func(body io.Reader) {
-									expectObject(body, scanBothReportsFilled)
+									expectObject(body, exampleWithDataFilled)
 								}
 							})
 							It("Should return it with the report", func(ctx context.Context) { runCase(ctx) })
 						})
 					})
-					When("The scan is in both kubernetes and the archive", func() {
+					When("The example is in both kubernetes and the archive", func() {
 						BeforeEach(func() {
 							test.code = http.StatusOK
 						})
 						BeforeEach(func(ctx context.Context) {
-							scan = scanBothReports.DeepCopy()
-							scan.Name = "test"
-							scan2 := scanNoReports.DeepCopy()
-							scan2.Name = "test"
-							k8sObject(ctx, scan)
-							archiveObject[*akv1a1.Scan, *akv1a1.ScanList](ctx, archive, scan2)
+							example = exampleWithData.DeepCopy()
+							example.Name = "test"
+							example2 := exampleNoData.DeepCopy()
+							example2.Name = "test"
+							k8sObject(ctx, example)
+							archiveObject[*ev1a1.Example, *ev1a1.ExampleList](ctx, exampleArchive, example2)
 							test.withBody = func(body io.Reader) {
-								expectObject(body, scanBothReportsFilled)
+								expectObject(body, exampleWithDataFilled)
 							}
 						})
-						It("Should return the scan from kubernetes", func(ctx context.Context) { runCase(ctx) })
+						It("Should return the example from kubernetes", func(ctx context.Context) { runCase(ctx) })
 					})
 				})
 			})
@@ -616,13 +510,13 @@ func (t testCase) validate() {
 	Expect(t.code).ToNot(BeZero())
 }
 
-func (t testCase) test(api *akapi.API) {
+func (t testCase) test(api *ksched.API) {
 	GinkgoHelper()
 	api.TokenGetter = t.token
 
 	policy, err := template.New("test-policy").Parse(t.policy)
 	Expect(err).ToNot(HaveOccurred())
-	api.RBACPolicy = policy
+	api.RBACPolicy = &ksched.TemplatePolicy{Template: policy, Decoder: api.Decoder}
 
 	req, err := http.NewRequest(t.method, srv.URL+t.path, t.body)
 	Expect(err).ToNot(HaveOccurred())
@@ -702,7 +596,7 @@ func expectObjectList[O any, OPtr client.Object, OList client.ObjectList](body i
 	for _, ptr := range ptrs {
 		clearMetadata(ptr)
 	}
-	// Expect((interface{}(objs[0])).(akv1a1.Scan).ObjectMeta).To(Equal((interface{}(items[0])).(akv1a1.Scan).ObjectMeta))
+	// Expect((interface{}(objs[0])).(ev1a1.Example).ObjectMeta).To(Equal((interface{}(items[0])).(ev1a1.Example).ObjectMeta))
 	Expect(items).To(ContainElements(objs))
 	if len(badObjs) != 0 {
 		for _, obj := range badObjs {
@@ -711,8 +605,8 @@ func expectObjectList[O any, OPtr client.Object, OList client.ObjectList](body i
 	}
 }
 
-func getListScans(l *akv1a1.ScanList) ([]akv1a1.Scan, []*akv1a1.Scan) {
-	ptrs := make([]*akv1a1.Scan, len(l.Items))
+func getListScans(l *ev1a1.ExampleList) ([]ev1a1.Example, []*ev1a1.Example) {
+	ptrs := make([]*ev1a1.Example, len(l.Items))
 	for ix := range l.Items {
 		ptrs[ix] = &l.Items[ix]
 	}
@@ -727,8 +621,8 @@ metadata:
   name: test
   namespace: default
 rules:
-- apiGroups: [ankyra.meln5674.github.com]
-  resources: [scans]
+- apiGroups: [ksched-internal-testing.meln5674.github.com]
+  resources: [examples]
   verbs: [create]`
 	namespacedCreatePermissionsTwoNamespaces = `
 apiVersion: rbac.authorization.k8s.io/v1
@@ -737,8 +631,8 @@ metadata:
   name: test
   namespace: default
 rules:
-- apiGroups: [ankyra.meln5674.github.com]
-  resources: [scans]
+- apiGroups: [ksched-internal-testing.meln5674.github.com]
+  resources: [examples]
   verbs: [create]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -747,8 +641,8 @@ metadata:
   name: test
   namespace: default
 rules:
-- apiGroups: [ankyra.meln5674.github.com]
-  resources: [scans]
+- apiGroups: [ksched-internal-testing.meln5674.github.com]
+  resources: [examples]
   verbs: [create]`
 	namespacedGetPermissions = `
 apiVersion: rbac.authorization.k8s.io/v1
@@ -757,8 +651,8 @@ metadata:
   name: test
   namespace: default
 rules:
-- apiGroups: [ankyra.meln5674.github.com]
-  resources: [scans]
+- apiGroups: [ksched-internal-testing.meln5674.github.com]
+  resources: [examples]
   verbs: [get, list]`
 	wrongNamespacedGetPermissions = `
 apiVersion: rbac.authorization.k8s.io/v1
@@ -767,8 +661,8 @@ metadata:
   name: test
   namespace: not-default
 rules:
-- apiGroups: [ankyra.meln5674.github.com]
-  resources: [scans]
+- apiGroups: [ksched-internal-testing.meln5674.github.com]
+  resources: [examples]
   verbs: [get, list]`
 	clusterGetPermissions = `
 apiVersion: rbac.authorization.k8s.io/v1
@@ -776,8 +670,8 @@ kind: ClusterRole
 metadata:
   name: test
 rules:
-- apiGroups: [ankyra.meln5674.github.com]
-  resources: [scans]
+- apiGroups: [ksched-internal-testing.meln5674.github.com]
+  resources: [examples]
   verbs: [get, list]`
 )
 
@@ -789,86 +683,35 @@ func bodyFor(obj client.Object) io.Reader {
 }
 
 var (
-	scanMeta = metav1.TypeMeta{
-		APIVersion: akv1a1.GroupVersion.Group + "/" + akv1a1.GroupVersion.Version,
-		Kind:       "Scan",
+	exampleMeta = metav1.TypeMeta{
+		APIVersion: ev1a1.GroupVersion.Group + "/" + ev1a1.GroupVersion.Version,
+		Kind:       "Example",
 	}
 
-	scanNoReports = &akv1a1.Scan{
-		TypeMeta: scanMeta,
+	exampleNoData = &ev1a1.Example{
+		TypeMeta: exampleMeta,
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: "default",
 			Name:      "no-reports",
 		},
-		Spec: akv1a1.ScanSpec{
-			Artifacts: []string{"foo"},
-		},
+		Spec: ev1a1.ExampleSpec{},
 	}
-	scanWrongNamespace = &akv1a1.Scan{
-		TypeMeta: scanMeta,
+	exampleWrongNamespace = &ev1a1.Example{
+		TypeMeta: exampleMeta,
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: "not-default",
 			Name:      "no-reports",
 		},
-		Spec: akv1a1.ScanSpec{
-			Artifacts: []string{"foo"},
-		},
-		Status: akv1a1.ScanStatus{
-			Artifacts: map[string]akv1a1.ArtifactStatus{
-				"foo": akv1a1.ArtifactStatus{},
-			},
-		},
+		Spec: ev1a1.ExampleSpec{},
 	}
-	scanSyftReport = &akv1a1.Scan{
-		TypeMeta: scanMeta,
+	exampleWithData = &ev1a1.Example{
+		TypeMeta: exampleMeta,
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: "default",
 			Name:      "syft-report",
 		},
-		Spec: akv1a1.ScanSpec{
-			Artifacts: []string{"foo"},
-		},
-		Status: akv1a1.ScanStatus{
-			Artifacts: map[string]akv1a1.ArtifactStatus{
-				"foo": akv1a1.ArtifactStatus{
-					SyftReportID: newOf("syft-report-id"),
-				},
-			},
-		},
-	}
-	scanGrypeReport = &akv1a1.Scan{
-		TypeMeta: scanMeta,
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: "default",
-			Name:      "grype-report",
-		},
-		Spec: akv1a1.ScanSpec{
-			Artifacts: []string{"foo"},
-		},
-		Status: akv1a1.ScanStatus{
-			Artifacts: map[string]akv1a1.ArtifactStatus{
-				"foo": akv1a1.ArtifactStatus{
-					GrypeReportID: newOf("grype-report-id"),
-				},
-			},
-		},
-	}
-	scanBothReports = &akv1a1.Scan{
-		TypeMeta: scanMeta,
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: "default",
-			Name:      "both-reports",
-		},
-		Spec: akv1a1.ScanSpec{
-			Artifacts: []string{"foo"},
-		},
-		Status: akv1a1.ScanStatus{
-			Artifacts: map[string]akv1a1.ArtifactStatus{
-				"foo": akv1a1.ArtifactStatus{
-					SyftReportID:  newOf("syft-report-id"),
-					GrypeReportID: newOf("grype-report-id"),
-				},
-			},
+		Spec: ev1a1.ExampleSpec{
+			HasData: true,
 		},
 	}
 )
@@ -893,27 +736,18 @@ func k8sObject[O client.Object](ctx context.Context, obj O) {
 	ctrl.Log.WithName("tests").Info("Added to k8s", "type", obj.GetObjectKind().GroupVersionKind(), "key", client.ObjectKeyFromObject(obj))
 }
 
-func archiveObject[O kschedobj.Object, OList client.ObjectList](ctx context.Context, archive ksched.Archiver[O, OList], obj O) {
+func archiveObject[O object.Object, OList client.ObjectList](ctx context.Context, archive archive.Archiver[O, OList], obj O) {
 	GinkgoHelper()
 	Expect(archive.ArchiveObject(ctx, obj)).To(Succeed())
 	ctrl.Log.WithName("tests").Info("Added to Archive", "type", obj.GetObjectKind().GroupVersionKind(), "key", client.ObjectKeyFromObject(obj))
 }
 
-func setReports(scan *akv1a1.Scan, artifact string, syft []byte, grype []byte) *akv1a1.Scan {
+func setMutatedData(example *ev1a1.Example, data ev1a1.MutatedData) *ev1a1.Example {
 	GinkgoHelper()
-	status := scan.Status.Artifacts[artifact]
-	status.SyftReport = json.RawMessage(syft)
-	status.GrypeReport = json.RawMessage(grype)
-	scan.Status.Artifacts[artifact] = status
-	return scan
+	example.Status.MutatedData = &data
+	return example
 }
 
-//go:embed syft.json
-var testSyftReportBytes []byte
-var testSyftReport syft.Document
-
-//go:embed grype.json
-var testGrypeReportBytes []byte
-var testGrypeReport grype.Document
-
-*/
+//go:embed mutated-data.json
+var mutatedDataBytes []byte
+var mutatedData ev1a1.MutatedData

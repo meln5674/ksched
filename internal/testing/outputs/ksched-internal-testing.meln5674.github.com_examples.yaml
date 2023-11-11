@@ -35,12 +35,21 @@ spec:
             properties:
               assignedTo:
                 type: string
+              hasData:
+                type: boolean
             type: object
           status:
             properties:
               completedAt:
                 format: date-time
                 type: string
+              mutatedData:
+                properties:
+                  foo:
+                    type: string
+                required:
+                - foo
+                type: object
               successful:
                 type: boolean
             type: object

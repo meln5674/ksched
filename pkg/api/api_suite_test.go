@@ -1,23 +1,42 @@
 package api_test
 
-// . "github.com/onsi/ginkgo/v2"
-// . "github.com/onsi/gomega"
+import (
+	"context"
+	"encoding/json"
+	"net/http/httptest"
+	"testing"
 
-/*
+	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/runtime/serializer"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/envtest"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-func TestApi(t *testing.T) {
+	ev1a1 "github.com/meln5674/ksched/internal/testing/v1alpha1"
+	ksched "github.com/meln5674/ksched/pkg/api"
+	"github.com/meln5674/ksched/pkg/archive"
+
+	"github.com/meln5674/gingk8s"
+	"github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+)
+
+func TestAPI(t *testing.T) {
 	RegisterFailHandler(Fail)
-	RunSpecs(t, "Api Suite")
+	RunSpecs(t, "API Suite")
 }
 
 var _ = BeforeSuite(func() {
 	var err error
 
-	Expect(json.Unmarshal(testSyftReportBytes, &testSyftReport)).To(Succeed())
-	testSyftReportBytes, err = json.Marshal(&testSyftReport)
-	Expect(err).NotTo(HaveOccurred())
-	Expect(json.Unmarshal(testGrypeReportBytes, &testGrypeReport)).To(Succeed())
-	testGrypeReportBytes, err = json.Marshal(&testGrypeReport)
+	Expect(json.Unmarshal(mutatedDataBytes, &mutatedData)).To(Succeed())
+	mutatedDataBytes, err = json.Marshal(&mutatedData)
 	Expect(err).NotTo(HaveOccurred())
 
 	logf.SetLogger(zap.New(zap.WriteTo(GinkgoWriter), zap.UseDevMode(true)))
@@ -50,12 +69,13 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 	err = rbacv1.AddToScheme(testCluster.Environment.Scheme)
 	Expect(err).NotTo(HaveOccurred())
-	err = akv1a1.AddToScheme(testCluster.Environment.Scheme)
+	err = ev1a1.AddToScheme(testCluster.Environment.Scheme)
 	Expect(err).NotTo(HaveOccurred())
 
 	api.K8s = k8sClient
 	api.Scheme = testCluster.Environment.Scheme
 	api.Decoder = serializer.NewCodecFactory(testCluster.Environment.Scheme).UniversalDeserializer()
+	Expect(ksched.RegisterType(api, "examples", new(ev1a1.Example), new(ev1a1.ExampleList), exampleInfo)).To(Succeed())
 
 	srv = httptest.NewServer(api)
 	DeferCleanup(srv.Close)
@@ -80,39 +100,86 @@ var _ = BeforeSuite(func() {
 var (
 	testCluster = gingk8s.EnvTestCluster{
 		Environment: envtest.Environment{
-			CRDDirectoryPaths: []string{"../../config/crd/bases"},
+			CRDDirectoryPaths: []string{"../../internal/testing/outputs/"},
 		},
 	}
 	k8sClient client.Client
 
-	store = &report.InMemoryStore{
-		SBOM:                make(map[string]report.SBOM, 0),
-		VulnerabilityReport: make(map[string]report.VulnerabilityReport, 0),
-	}
-	archive = &ksched.InMemoryArchiver[*akv1a1.Scan, *akv1a1.ScanList]{
-		Objects:   make(map[string]map[string]*akv1a1.Scan, 0),
-		NewObject: func() *akv1a1.Scan { return new(akv1a1.Scan) },
-		ListOf: func(scans []*akv1a1.Scan) *akv1a1.ScanList {
-			list := new(akv1a1.ScanList)
-			list.Items = make([]akv1a1.Scan, len(scans))
+	exampleArchive = &archive.InMemoryArchiver[*ev1a1.Example, *ev1a1.ExampleList]{
+		Objects:   make(map[string]map[string]*ev1a1.Example, 0),
+		NewObject: func() *ev1a1.Example { return new(ev1a1.Example) },
+		ListOf: func(scans []*ev1a1.Example) *ev1a1.ExampleList {
+			list := new(ev1a1.ExampleList)
+			list.Items = make([]ev1a1.Example, len(scans))
 			for ix, scan := range scans {
 				list.Items[ix] = *scan
 			}
 			return list
 		},
-		DeepCopyInto: func(src, dest *akv1a1.Scan) { src.DeepCopyInto(dest) },
-		DeepCopy:     func(scan *akv1a1.Scan) *akv1a1.Scan { return scan.DeepCopy() },
+		DeepCopyInto: func(src, dest *ev1a1.Example) { src.DeepCopyInto(dest) },
+		DeepCopy:     func(scan *ev1a1.Example) *ev1a1.Example { return scan.DeepCopy() },
 	}
-	api = &akapi.API{
-		Config: akapi.Config{
+	api = &ksched.API{
+		Config: ksched.Config{
 			Prefix: "/prefix/",
 		},
-		Store:   store,
-		Archive: archive,
-		Log:     ctrl.Log.WithName("api"),
+		Log: ctrl.Log.WithName("api"),
 	}
+	exampleInfo ksched.ObjectInfo[*ev1a1.Example, *ev1a1.ExampleList] = &exampleObjectInfo{archive: exampleArchive}
 
 	srv *httptest.Server
 )
 
-*/
+type exampleObjectInfo struct {
+	archive archive.Archiver[*ev1a1.Example, *ev1a1.ExampleList]
+}
+
+var _ = ksched.ObjectInfo[*ev1a1.Example, *ev1a1.ExampleList]((*exampleObjectInfo)(nil))
+
+func (e *exampleObjectInfo) New() *ev1a1.Example {
+	return new(ev1a1.Example)
+}
+func (e *exampleObjectInfo) NewList() *ev1a1.ExampleList {
+	return new(ev1a1.ExampleList)
+}
+
+func (e *exampleObjectInfo) MutateFromRead(ctx context.Context, obj *ev1a1.Example) error {
+	if obj.Spec.HasData {
+		obj.Status.MutatedData = &mutatedData
+	}
+	return nil
+}
+func (e *exampleObjectInfo) MutateFromList(ctx context.Context, objs *ev1a1.ExampleList) error {
+	for ix := range objs.Items {
+		if objs.Items[ix].Spec.HasData {
+			objs.Items[ix].Status.MutatedData = &mutatedData
+		}
+	}
+	return nil
+}
+func (e *exampleObjectInfo) MutateForWrite(ctx context.Context, obj *ev1a1.Example) error {
+	obj.Status.MutatedData = nil
+	return nil
+}
+
+func (e *exampleObjectInfo) Namespaced() bool {
+	return true
+}
+
+func (e *exampleObjectInfo) GVK() schema.GroupVersionKind {
+	return schema.GroupVersionKind{
+		Group:   ev1a1.GroupVersion.Group,
+		Version: ev1a1.GroupVersion.Version,
+		Kind:    "Example",
+	}
+}
+func (e *exampleObjectInfo) ListGVK() schema.GroupVersionKind {
+	return schema.GroupVersionKind{
+		Group:   ev1a1.GroupVersion.Group,
+		Version: ev1a1.GroupVersion.Version,
+		Kind:    "ExampleList",
+	}
+}
+func (e *exampleObjectInfo) Archive() archive.Archiver[*ev1a1.Example, *ev1a1.ExampleList] {
+	return e.archive
+}

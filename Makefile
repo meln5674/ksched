@@ -1,3 +1,7 @@
+.PHONY: vet
+vet:
+	go vet ./...
+
 ## Location to install dependencies to
 LOCALBIN ?= $(shell pwd)/bin
 $(LOCALBIN):
@@ -17,6 +21,13 @@ envtest: $(ENVTEST) ## Download envtest-setup locally if necessary.
 $(ENVTEST): $(LOCALBIN)
 	test -s $(LOCALBIN)/setup-envtest || GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
 
+GINKGO_VERSION ?= $(shell go mod edit -print | grep ginkgo | cut -d ' ' -f2)
+GINKGO ?= $(LOCALBIN)/ginkgo
+$(GINKGO):
+	mkdir -p $(LOCALBIN)
+	GOBIN=$(LOCALBIN) go install github.com/onsi/ginkgo/v2/ginkgo@$(GINKGO_VERSION)
+ginkgo: $(GINKGO)
+
 .PHONY: test-generate
 test-generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
 	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt" paths="./internal/testing/..."
@@ -27,6 +38,6 @@ test-manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and
 
 
 .PHONY: test
-test: $(ENVTEST) test-manifests test-generate
-	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" ginkgo run -vv -coverpkg ./pkg/... ./... 
+test: $(ENVTEST) $(GINKGO) test-manifests test-generate
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" $(GINKGO) run -vv -coverpkg ./pkg/...,./contrib/ksched-mongodb/pkg/... ./...
 

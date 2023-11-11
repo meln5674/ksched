@@ -23,13 +23,19 @@ import (
 type ExampleSpec struct {
 	// +optional
 	AssignedTo string `json:"assignedTo,omitempty"`
+	HasData    bool   `json:"hasData,omitempty"`
+}
+
+type MutatedData struct {
+	Foo string `json:"foo"`
 }
 
 type ExampleStatus struct {
 	// +optional
 	CompletedAt *metav1.Time `json:"completedAt,omitempty"`
 	// +optional
-	Successful bool `json:"successful,omitempty"`
+	Successful  bool         `json:"successful,omitempty"`
+	MutatedData *MutatedData `json:"mutatedData,omitempty"`
 }
 
 //+kubebuilder:object:root=true
