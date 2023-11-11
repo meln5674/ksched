@@ -39,5 +39,5 @@ test-manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and
 
 .PHONY: test
 test: $(ENVTEST) $(GINKGO) test-manifests test-generate
-	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" $(GINKGO) run -vv -coverpkg ./pkg/...,./contrib/ksched-mongodb/pkg/... ./...
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" $(GINKGO) run -vv -coverpkg ./pkg/...,./contrib/ksched-mongodb/pkg/... ./pkg/...
 
