@@ -48,7 +48,7 @@ var _ = Describe("Api", func() {
 	When("No token is present", func() {
 		BeforeEach(func() {
 			test.method = http.MethodGet
-			test.path = "/prefix/apis/"
+			test.path = "/prefix/apis/dummy/v1/foo"
 			test.token = noToken()
 			test.code = http.StatusUnauthorized
 		})
@@ -57,7 +57,7 @@ var _ = Describe("Api", func() {
 	When("An invalid token is present", func() {
 		BeforeEach(func() {
 			test.method = http.MethodGet
-			test.path = "/prefix/apis/"
+			test.path = "/prefix/apis/dummy/v1/foo"
 			test.token = invalidToken()
 			test.code = http.StatusUnauthorized
 		})
@@ -75,9 +75,9 @@ var _ = Describe("Api", func() {
 			When("The namespace is blank", func() {
 				BeforeEach(func() {
 					test.path = "/prefix/apis/ksched-internal-testing.meln5674.github.com/v1alpha1/examples"
-					test.code = http.StatusNotFound
+					test.code = http.StatusForbidden
 				})
-				It("Should reject as not found", func(ctx context.Context) { runCase(ctx) })
+				It("Should reject as forbidden", func(ctx context.Context) { runCase(ctx) })
 			})
 			When("The namespace is set", func() {
 				BeforeEach(func() {
@@ -623,7 +623,11 @@ metadata:
 rules:
 - apiGroups: [ksched-internal-testing.meln5674.github.com]
   resources: [examples]
-  verbs: [create]`
+  verbs: [create]
+- apiGroups: ['']
+  resources: [pods]
+  verbs: [create]
+`
 	namespacedCreatePermissionsTwoNamespaces = `
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -634,6 +638,9 @@ rules:
 - apiGroups: [ksched-internal-testing.meln5674.github.com]
   resources: [examples]
   verbs: [create]
+- apiGroups: ['']
+  resources: [pods]
+  verbs: [create]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -643,7 +650,11 @@ metadata:
 rules:
 - apiGroups: [ksched-internal-testing.meln5674.github.com]
   resources: [examples]
-  verbs: [create]`
+  verbs: [create]
+- apiGroups: ['']
+  resources: [pods]
+  verbs: [create]
+`
 	namespacedGetPermissions = `
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -653,7 +664,11 @@ metadata:
 rules:
 - apiGroups: [ksched-internal-testing.meln5674.github.com]
   resources: [examples]
-  verbs: [get, list]`
+  verbs: [get, list]
+- apiGroups: ['']
+  resources: [pods]
+  verbs: [get, list]
+`
 	wrongNamespacedGetPermissions = `
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -663,7 +678,11 @@ metadata:
 rules:
 - apiGroups: [ksched-internal-testing.meln5674.github.com]
   resources: [examples]
-  verbs: [get, list]`
+  verbs: [get, list]
+- apiGroups: ['']
+  resources: [pods]
+  verbs: [get, list]
+`
 	clusterGetPermissions = `
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -672,7 +691,11 @@ metadata:
 rules:
 - apiGroups: [ksched-internal-testing.meln5674.github.com]
   resources: [examples]
-  verbs: [get, list]`
+  verbs: [get, list]
+- apiGroups: ['']
+  resources: [pods]
+  verbs: [get, list]
+`
 )
 
 func bodyFor(obj client.Object) io.Reader {

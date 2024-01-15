@@ -15,6 +15,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/golang-jwt/jwt/v4"
 	"github.com/meln5674/gotoken"
+	"github.com/meln5674/minimux"
 
 	"github.com/golang/protobuf/proto"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
@@ -605,37 +606,417 @@ func RegisterType[O client.Object, OList object.ObjectList[O]](a *API, urlKind s
 	return nil
 }
 
-// ServeHTTP implements http.Handler.
-func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	defer func() {
-		r := recover()
-		err, isErr := r.(error)
-		if r != nil && isErr {
-			a.Log.Error(err, "HTTP request panicked")
-		} else if r != nil {
-			a.Log.Error(fmt.Errorf("%#v", err), "HTTP request panicked")
-		} else {
-			a.Log.Info("HTTP request completed")
-		}
-	}()
+var (
+// - {prefix}/openapi/{version}: OpenAPI discovery.
+// - {prefix}/api/{version}: Legacy (core/v1) api discovery.
+// - {prefix}/api/{version}/[namespaces/{namespace}/]{kind}[/{name}]: Proxy access to legacy (core/v1) k8s resources.
+// - {prefix}/apis/{group}/{version}: API discovery.
+// - {prefix}/apis/{group}/{version}/[namespaces/{namespace}/]{kind}[/{name}]: Proxy access to k8s resources.
+
+)
+
+func (a *API) Mux() *minimux.Mux {
+	prefix := strings.TrimSuffix(a.Prefix, "/")
+
+	var (
+
+		// - {prefix}/openapi/{version}: OpenAPI discovery.
+		// - {prefix}/api/[{version}/]: Legacy (core/v1) api discovery.
+		// - {prefix}/api/{version}/[namespaces/{namespace}/]{kind}[/{name}]: Proxy access to legacy (core/v1) k8s resources.
+		// - {prefix}/apis/[{group}[/{version}]]: API discovery.
+		// - {prefix}/apis/{group}/{version}/[namespaces/{namespace}/]{kind}[/{name}]: Proxy access to k8s resources.
+
+		openAPIDiscoveryPath = minimux.LiteralPath(prefix + "/openapi/v2")
+
+		legacyAPIDiscoveryPath         = minimux.PathPattern(prefix + "/api/?")
+		legacyAPIVersionDiscoveryPath  = minimux.PathWithVars(prefix+"/api/([^/]+)", "version")
+		legacyNamespacedCollectionPath = minimux.PathWithVars(prefix+"/api/([^/]+)/namespaces/([^/]+)/([^/]+)/?", "version", "namespace", "kind")
+		legacyNamespacedResourcePath   = minimux.PathWithVars(prefix+"/api/([^/]+)/namespaces/([^/]+)/([^/]+)/([^/]+)", "version", "namespace", "kind", "name")
+		legacyClusterCollectionPath    = minimux.PathWithVars(prefix+"/api/([^/]+)/([^/]+)/?", "version", "kind")
+		legacyClusterResourcePath      = minimux.PathWithVars(prefix+"/api/([^/]+)/([^/]+)/([^/]+)", "version", "kind", "name")
+
+		apiDiscoveryPath             = minimux.PathPattern(prefix + "/apis/?")
+		apiGroupDiscoveryPath        = minimux.PathWithVars(prefix+"/apis/([^/]+)/?", "group")
+		apiGroupVersionDiscoveryPath = minimux.PathWithVars(prefix+"/apis/([^/]+)/([^/]+)/?", "group", "version")
+		namespacedCollectionPath     = minimux.PathWithVars(prefix+"/apis/([^/]+)/([^/]+)/namespaces/([^/]+)/([^/]+)/?", "group", "version", "namespace", "kind")
+		namespacedResourcePath       = minimux.PathWithVars(prefix+"/apis/([^/]+)/([^/]+)/namespaces/([^/]+)/([^/]+)/([^/]+)", "group", "version", "namespace", "kind", "name")
+		clusterCollectionPath        = minimux.PathWithVars(prefix+"/apis/([^/]+)/([^/]+)/([^/]+)/?", "group", "version", "kind")
+		clusterResourcePath          = minimux.PathWithVars(prefix+"/apis/([^/]+)/([^/]+)/([^/]+)/([^/]+)", "group", "version", "kind", "name")
+	)
+
+	openAPIRoutes := []minimux.Route{
+		openAPIDiscoveryPath.
+			WithMethods(http.MethodGet).
+			IsHandledByFunc(a.OpenAPIDiscovery),
+	}
+
+	legacyAPIDiscoveryRoutes := []minimux.Route{
+		legacyAPIDiscoveryPath.
+			WithMethods(http.MethodGet).
+			IsHandledByFunc(a.LegacyAPIDiscovery),
+		legacyAPIVersionDiscoveryPath.
+			WithMethods(http.MethodGet).
+			IsHandledByFunc(a.LegacyAPIDiscovery),
+	}
+
+	///////
+
+	legacyNamespacedCollectionRoutes := []minimux.Route{
+		legacyNamespacedCollectionPath.
+			WithMethods(http.MethodGet, http.MethodHead).
+			IsHandledByFunc(a.ListCollection),
+		legacyNamespacedCollectionPath.
+			WithMethods(http.MethodPost).
+			IsHandledByFunc(a.CreateResource),
+		legacyNamespacedCollectionPath.
+			WithMethods(http.MethodDelete).
+			IsHandledByFunc(a.DeleteCollection),
+	}
+
+	legacyNamespacedResourceRoutes := []minimux.Route{
+		legacyNamespacedResourcePath.
+			WithMethods(http.MethodGet, http.MethodHead).
+			IsHandledByFunc(a.GetResource),
+		legacyNamespacedResourcePath.
+			WithMethods(http.MethodPut).
+			IsHandledByFunc(a.UpdateResource),
+		legacyNamespacedResourcePath.
+			WithMethods(http.MethodDelete).
+			IsHandledByFunc(a.DeleteResource),
+	}
+
+	legacyClusterCollectionRoutes := []minimux.Route{
+		legacyClusterCollectionPath.
+			WithMethods(http.MethodGet, http.MethodHead).
+			IsHandledByFunc(a.ListCollection),
+		legacyClusterCollectionPath.
+			WithMethods(http.MethodPost).
+			IsHandledByFunc(a.CreateResource),
+		legacyClusterCollectionPath.
+			WithMethods(http.MethodDelete).
+			IsHandledByFunc(a.DeleteCollection),
+	}
+
+	legacyClusterResourceRoutes := []minimux.Route{
+		legacyClusterResourcePath.
+			WithMethods(http.MethodGet, http.MethodHead).
+			IsHandledByFunc(a.GetResource),
+		legacyClusterResourcePath.
+			WithMethods(http.MethodPut).
+			IsHandledByFunc(a.UpdateResource),
+		legacyClusterResourcePath.
+			WithMethods(http.MethodDelete).
+			IsHandledByFunc(a.DeleteResource),
+	}
+
+	///////
+
+	apiDiscoveryRoutes := []minimux.Route{
+		apiDiscoveryPath.
+			WithMethods(http.MethodGet).
+			IsHandledByFunc(a.APIDiscovery),
+		apiGroupDiscoveryPath.
+			WithMethods(http.MethodGet).
+			IsHandledByFunc(a.APIDiscovery),
+		apiGroupVersionDiscoveryPath.
+			WithMethods(http.MethodGet).
+			IsHandledByFunc(a.APIDiscovery),
+	}
+
+	namespacedCollectionRoutes := []minimux.Route{
+		namespacedCollectionPath.
+			WithMethods(http.MethodGet, http.MethodHead).
+			IsHandledByFunc(a.ListCollection),
+		namespacedCollectionPath.
+			WithMethods(http.MethodPost).
+			IsHandledByFunc(a.CreateResource),
+		namespacedCollectionPath.
+			WithMethods(http.MethodDelete).
+			IsHandledByFunc(a.DeleteCollection),
+	}
+
+	namespacedResourceRoutes := []minimux.Route{
+		namespacedResourcePath.
+			WithMethods(http.MethodGet, http.MethodHead).
+			IsHandledByFunc(a.GetResource),
+		namespacedResourcePath.
+			WithMethods(http.MethodPut).
+			IsHandledByFunc(a.UpdateResource),
+		namespacedResourcePath.
+			WithMethods(http.MethodDelete).
+			IsHandledByFunc(a.DeleteResource),
+	}
+
+	clusterCollectionRoutes := []minimux.Route{
+		clusterCollectionPath.
+			WithMethods(http.MethodGet, http.MethodHead).
+			IsHandledByFunc(a.ListCollection),
+		clusterCollectionPath.
+			WithMethods(http.MethodPost).
+			IsHandledByFunc(a.CreateResource),
+		clusterCollectionPath.
+			WithMethods(http.MethodDelete).
+			IsHandledByFunc(a.DeleteCollection),
+	}
+
+	clusterResourceRoutes := []minimux.Route{
+		clusterResourcePath.
+			WithMethods(http.MethodGet, http.MethodHead).
+			IsHandledByFunc(a.GetResource),
+		clusterResourcePath.
+			WithMethods(http.MethodPut).
+			IsHandledByFunc(a.UpdateResource),
+		clusterResourcePath.
+			WithMethods(http.MethodDelete).
+			IsHandledByFunc(a.DeleteResource),
+	}
+
+	routes := []minimux.Route{}
+	routes = append(routes, openAPIRoutes...)
+	routes = append(routes, legacyAPIDiscoveryRoutes...)
+	routes = append(routes, legacyNamespacedCollectionRoutes...)
+	routes = append(routes, legacyNamespacedResourceRoutes...)
+	routes = append(routes, legacyClusterCollectionRoutes...)
+	routes = append(routes, legacyClusterResourceRoutes...)
+	routes = append(routes, apiDiscoveryRoutes...)
+	routes = append(routes, namespacedCollectionRoutes...)
+	routes = append(routes, namespacedResourceRoutes...)
+	routes = append(routes, clusterCollectionRoutes...)
+	routes = append(routes, clusterResourceRoutes...)
+
+	return &minimux.Mux{
+		PreProcess:     minimux.PreProcessorChain(minimux.CancelWhenDone, a.LogPendingRequest),
+		PostProcess:    a.LogCompletedRequest,
+		DefaultHandler: minimux.NotFound,
+		Routes:         routes,
+	}
+}
+
+func (a *API) LogPendingRequest(ctx context.Context, req *http.Request) (context.Context, func()) {
+	// Extra space deliberate to line up logs w/ post procesor
+	a.Log.Info("Incoming  request", "method", req.Method, "url", req.URL, "user-agent", req.UserAgent())
+	return ctx, func() {}
+}
+
+func (a *API) LogCompletedRequest(ctx context.Context, req *http.Request, statusCode int, err error) {
+	if err != nil {
+		a.Log.Error(err, "Completed request", "method", req.Method, "url", req.URL, "user-agent", req.UserAgent(), "status-code", statusCode)
+	} else {
+		a.Log.Info("Completed request", "method", req.Method, "url", req.URL, "user-agent", req.UserAgent(), "status-code", statusCode)
+	}
+}
+
+func (a *API) OpenAPIDiscovery(ctx context.Context, w http.ResponseWriter, r *http.Request, _ map[string]string, _ error) error {
+	openapiv2, err := a.K8sDiscovery.OpenAPISchema()
+	if err != nil {
+		a.Log.Error(err, "Failed to fetch openapi v2 schema")
+		handleK8sError(w, err)
+		return nil
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("X-Varied-Accept", openAPIV2mimePb)
+	w.Header().Set("Vary", "Accept")
+	bytes, err := proto.Marshal(openapiv2)
+	if err != nil {
+		a.Log.Error(err, "Failed to re-marshal openapi protobuf")
+		w.WriteHeader(http.StatusInternalServerError)
+		return nil
+	}
+	w.WriteHeader(http.StatusOK)
+	_, err = w.Write(bytes)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (a *API) LegacyAPIDiscovery(ctx context.Context, w http.ResponseWriter, r *http.Request, pathVars map[string]string, _ error) error {
 	lr := LoggableRequest{
 		URL:    *r.URL,
 		Method: r.Method,
 		Header: r.Header,
 	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	if !strings.HasPrefix(r.URL.Path, a.Prefix) {
-		a.Log.Info("Request does not have prefix", "req", lr)
-		w.WriteHeader(http.StatusNotFound)
-		return
+	req := RequestWithBody{
+		Request: Request{
+			Version: pathVars["version"],
+		},
 	}
-	r.URL.Path = strings.TrimPrefix(r.URL.Path, a.Prefix)
-	defer func() { r.URL.Path = a.Prefix + r.URL.Path }()
+	if req.Version == "" {
+		a.Log.Info("Performing legacy API discovery", "req", lr, "parsed", req.Request)
+		// This section largely based on https://github.com/kubernetes/client-go/blob/64a35f6a46ec8a791d437495fd91c87bcd01a5b5/discovery/discovery_client.go#L233
+		var responseContentType string
+		body, err := a.K8sDiscovery.RESTClient().Get().
+			AbsPath("/api").
+			SetHeader("Accept", discovery.AcceptV1).
+			Do(ctx).
+			ContentType(&responseContentType).
+			Raw()
+		// Tolerate 404, since aggregated api servers can return it.
+		if err != nil && !kerrors.IsNotFound(err) {
+			a.Log.Error(err, "Legacy API discovery failed", "req", lr, "parsed", req.Request)
+			handleK8sError(w, err)
+			return nil
+		}
+		w.WriteHeader(http.StatusOK)
+		_, err = w.Write(body)
+		if err != nil {
+			a.Log.Error(err, "Error writing reponse body", "req", lr, "parsed", req.Request)
+		}
+		return nil
+	}
+	a.Log.Info("Performing Legacy API Version discovery", "req", lr, "parsed", req.Request)
+	resourceList, err := a.K8sDiscovery.ServerResourcesForGroupVersion(req.Version)
+	if err != nil {
+		a.Log.Error(err, "Legacy API Version discovery failed", "req", lr, "parsed", req.Request)
+		handleK8sError(w, err)
+		return nil
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	err = json.NewEncoder(w).Encode(resourceList)
+	if err != nil {
+		a.Log.Error(err, "Error writing reponse body", "req", lr, "parsed", req.Request)
+	}
+	return nil
+}
 
-	var req RequestWithBody
+func (a *API) APIDiscovery(ctx context.Context, w http.ResponseWriter, r *http.Request, pathVars map[string]string, _ error) error {
+	lr := LoggableRequest{
+		URL:    *r.URL,
+		Method: r.Method,
+		Header: r.Header,
+	}
+	req := RequestWithBody{
+		Request: Request{
+			Version: pathVars["version"],
+			Group:   pathVars["group"],
+		},
+	}
+	var body interface{}
+	if req.Group == "" && req.Version == "" {
+		a.Log.Info("Performing API Group/Version discovery", "req", lr, "parsed", req.Request)
+		groupList, err := a.K8sDiscovery.ServerGroups()
+		if err != nil {
+			a.Log.Error(err, "API Group/Version discovery failed", "req", lr, "parsed", req.Request)
+			handleK8sError(w, err)
+			return nil
+		}
+		// The discovery client returns the legacy group (core/v1) as well as the new groups,
+		// but this endpoint is only meant to return the new groups.
+		// If this isn't removed, kubectl encounters a a duplicate kind error.
+		if groupList.Groups[0].Name == "" {
+			groupList.Groups = groupList.Groups[1:]
+		}
+		body = groupList
+	} else {
+		a.Log.Info("Performing API discovery", "req", lr, "parsed", req.Request)
+		resourceList, err := a.K8sDiscovery.ServerResourcesForGroupVersion(req.Group + "/" + req.Version)
+		if err != nil {
+			a.Log.Error(err, "API discovery failed", "req", lr, "parsed", req.Request)
+			handleK8sError(w, err)
+			return nil
+		}
+		body = resourceList
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	return json.NewEncoder(w).Encode(body)
+}
+
+func (a *API) CreateResource(ctx context.Context, w http.ResponseWriter, r *http.Request, pathVars map[string]string, _ error) error {
+	verbs, req, lr, ok := a.ValidateRequest(ctx, w, r, "create", pathVars)
+	if !ok {
+		return nil
+	}
+
+	verbs.Create(ctx, req, lr, w)
+	return nil
+}
+
+func (a *API) ListCollection(ctx context.Context, w http.ResponseWriter, r *http.Request, pathVars map[string]string, _ error) error {
+	verb := "list"
+	if r.URL.Query().Get("watch") == "true" {
+		verb = "watch"
+	}
+	verbs, req, lr, ok := a.ValidateRequest(ctx, w, r, verb, pathVars)
+	if !ok {
+		return nil
+	}
+	if r.Method == http.MethodHead {
+		return nil
+	}
+
+	verbs.List(ctx, req, lr, w)
+	return nil
+}
+
+func (a *API) GetResource(ctx context.Context, w http.ResponseWriter, r *http.Request, pathVars map[string]string, _ error) error {
+	verbs, req, lr, ok := a.ValidateRequest(ctx, w, r, "get", pathVars)
+	if !ok {
+		return nil
+	}
+	if r.Method == http.MethodHead {
+		return nil
+	}
+
+	verbs.Get(ctx, req, lr, w)
+	return nil
+}
+
+func (a *API) UpdateResource(ctx context.Context, w http.ResponseWriter, r *http.Request, pathVars map[string]string, _ error) error {
+	// TODO: How does patch work?
+	verbs, req, lr, ok := a.ValidateRequest(ctx, w, r, "update", pathVars)
+	if !ok {
+		return nil
+	}
+
+	verbs.Update(ctx, req, lr, w)
+	return nil
+}
+
+func (a *API) DeleteCollection(ctx context.Context, w http.ResponseWriter, r *http.Request, pathVars map[string]string, _ error) error {
+	verbs, req, lr, ok := a.ValidateRequest(ctx, w, r, "delete-collection", pathVars)
+	if !ok {
+		return nil
+	}
+
+	verbs.DeleteCollection(ctx, req, lr, w)
+	return nil
+}
+
+func (a *API) DeleteResource(ctx context.Context, w http.ResponseWriter, r *http.Request, pathVars map[string]string, _ error) error {
+	verbs, req, lr, ok := a.ValidateRequest(ctx, w, r, "delete", pathVars)
+	if !ok {
+		return nil
+	}
+
+	verbs.Delete(ctx, req, lr, w)
+	return nil
+}
+
+// ValidateRequest confirms that
+// 1. A valid token was provided.
+// 2. The policy permits the holder of that token to perform the requested verb against the resoruce or collection specified by the path variables
+// 3. This API is configured to proxy the requested group/version/kind.
+// If all of three conditions are met, it returns the proxied API and the request to make against it, and return true.
+// If not, it will send the appropriate error back to the client, and return false.
+func (a *API) ValidateRequest(ctx context.Context, w http.ResponseWriter, r *http.Request, verb string, pathVars map[string]string) (verbs, *RequestWithBody, LoggableRequest, bool) {
+	lr := LoggableRequest{
+		URL:    *r.URL,
+		Method: r.Method,
+		Header: r.Header,
+	}
+	req := RequestWithBody{
+		Request: Request{
+			Version:   pathVars["version"],
+			Group:     pathVars["group"],
+			Kind:      pathVars["kind"],
+			Namespace: pathVars["namespace"],
+			Name:      pathVars["name"],
+			Verb:      verb,
+		},
+		Body: r.Body,
+	}
 	ok, err := a.Authenticate(r, &req)
 	if err != nil {
 		a.Log.Error(err, "Error during authentication", "req", lr)
@@ -643,167 +1024,28 @@ func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !ok || err != nil {
 		a.Log.Info("Request was not authenticated", "req", lr)
 		w.WriteHeader(http.StatusUnauthorized)
-		return
+		return nil, nil, lr, false
 	}
-	ok, err = a.ParseRequest(r, lr, &req)
+	gvk := schema.GroupVersionKind{Group: req.Group, Version: req.Version, Kind: req.Kind}
+	roles, err := a.RBACPolicy.GetRoles(req.Token)
 	if err != nil {
-		a.Log.Error(err, "Error parsing request", "req", lr)
-		w.WriteHeader(http.StatusBadRequest)
-		return
+		a.Log.Error(err, "Error preparing authorization", "req", lr, "parsed", req.Request)
+		w.WriteHeader(http.StatusForbidden)
+		return nil, nil, lr, false
 	}
+	ok = roles.Authorize(gvk, client.ObjectKey{Namespace: req.Namespace, Name: req.Name}, req.Verb)
 	if !ok {
-		a.Log.Info("Request method/path could not be parsed", "req", lr)
+		a.Log.Info("Request is not authorized", "req", lr, "parsed", req.Request)
+		w.WriteHeader(http.StatusForbidden)
+		return nil, nil, lr, false
+	}
+	verbs, ok := a.verbs[gvk]
+	if !ok {
+		a.Log.Info("Got request for unknown object type", "req", lr, "parsed", req.Request)
 		w.WriteHeader(http.StatusNotFound)
-		return
+		return nil, nil, lr, false
 	}
-
-	switch req.Type {
-	case RequestTypeResource, RequestTypeLegacyResource:
-		a.Log.Info("Parsed method/path/gvk", "req", lr, "parsed", req.Request)
-		roles, err := a.RBACPolicy.GetRoles(req.Token)
-		if err != nil {
-			a.Log.Error(err, "Error preparing authorization", "req", lr, "parsed", req.Request)
-			w.WriteHeader(http.StatusForbidden)
-			return
-		}
-		gvk := schema.GroupVersionKind{Group: req.Group, Version: req.Version, Kind: req.Kind}
-		ok = roles.Authorize(gvk, client.ObjectKey{Namespace: req.Namespace, Name: req.Name}, req.Verb)
-		if !ok {
-			a.Log.Info("Request is not authorized", "req", lr, "parsed", req.Request)
-			w.WriteHeader(http.StatusForbidden)
-			return
-		}
-		verbs, ok := a.verbs[gvk]
-		if !ok {
-			a.Log.Info("Got request for unknown object type", "req", lr, "parsed", req.Request)
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		switch req.Verb {
-		case "create":
-			verbs.Create(ctx, &req, lr, w)
-			return
-		case "get":
-			verbs.Get(ctx, &req, lr, w)
-			return
-		case "list":
-			verbs.List(ctx, &req, lr, w)
-			return
-		case "update":
-			verbs.Update(ctx, &req, lr, w)
-			return
-		case "delete":
-			verbs.Delete(ctx, &req, lr, w)
-			return
-		case "deletecollection":
-			verbs.DeleteCollection(ctx, &req, lr, w)
-			return
-		default:
-			panic(fmt.Sprintf("BUG: Invalid verb %s", req.Verb))
-		}
-	// TODO: Replace this all with just a reverse proxy
-	case RequestTypeLegacyDiscovery:
-		if req.Version == "" {
-			a.Log.Info("Performing legacy API discovery", "req", lr, "parsed", req.Request)
-			// This section largely based on https://github.com/kubernetes/client-go/blob/64a35f6a46ec8a791d437495fd91c87bcd01a5b5/discovery/discovery_client.go#L233
-			var responseContentType string
-			body, err := a.K8sDiscovery.RESTClient().Get().
-				AbsPath("/api").
-				SetHeader("Accept", discovery.AcceptV1).
-				Do(context.TODO()).
-				ContentType(&responseContentType).
-				Raw()
-			// Tolerate 404, since aggregated api servers can return it.
-			if err != nil && !kerrors.IsNotFound(err) {
-				a.Log.Error(err, "Legacy API discovery failed", "req", lr, "parsed", req.Request)
-				handleK8sError(w, err)
-				return
-			}
-			w.WriteHeader(http.StatusOK)
-			_, err = w.Write(body)
-			if err != nil {
-				a.Log.Error(err, "Error writing reponse body", "req", lr, "parsed", req.Request)
-				return
-			}
-		} else {
-			a.Log.Info("Performing Legacy API Version discovery", "req", lr, "parsed", req.Request)
-			resourceList, err := a.K8sDiscovery.ServerResourcesForGroupVersion(req.Version)
-			if err != nil {
-				a.Log.Error(err, "Legacy API Version discovery failed", "req", lr, "parsed", req.Request)
-				handleK8sError(w, err)
-				return
-			}
-			w.Header().Set("Content-Type", "application/json; charset=utf-8")
-			w.WriteHeader(http.StatusOK)
-			err = json.NewEncoder(w).Encode(resourceList)
-			if err != nil {
-				a.Log.Error(err, "Error writing reponse body", "req", lr, "parsed", req.Request)
-				return
-			}
-		}
-	case RequestTypeDiscovery:
-		var body interface{}
-		if req.Group == "" && req.Version == "" {
-			a.Log.Info("Performing API Group/Version discovery", "req", lr, "parsed", req.Request)
-			groupList, err := a.K8sDiscovery.ServerGroups()
-			if err != nil {
-				a.Log.Error(err, "API Group/Version discovery failed", "req", lr, "parsed", req.Request)
-				handleK8sError(w, err)
-				return
-			}
-			// The discovery client returns the legacy group (core/v1) as well as the new groups,
-			// but this endpoint is only meant to return the new groups.
-			// If this isn't removed, kubectl encounters a a duplicate kind error.
-			if groupList.Groups[0].Name == "" {
-				groupList.Groups = groupList.Groups[1:]
-			}
-			body = groupList
-		} else {
-			a.Log.Info("Performing API discovery", "req", lr, "parsed", req.Request)
-			resourceList, err := a.K8sDiscovery.ServerResourcesForGroupVersion(req.Group + "/" + req.Version)
-			if err != nil {
-				a.Log.Error(err, "API discovery failed", "req", lr, "parsed", req.Request)
-				handleK8sError(w, err)
-				return
-			}
-			body = resourceList
-		}
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		err = json.NewEncoder(w).Encode(body)
-		if err != nil {
-			a.Log.Error(err, "Error writing reponse body", "req", lr, "parsed", req.Request)
-			return
-		}
-	case RequestTypeOpenAPI:
-		switch req.Version {
-		case "v2":
-			openapiv2, err := a.K8sDiscovery.OpenAPISchema()
-			if err != nil {
-				a.Log.Error(err, "Failed to fetch openapi v2 schema")
-				handleK8sError(w, err)
-				return
-			}
-			w.Header().Set("Content-Type", "application/octet-stream")
-			w.Header().Set("X-Varied-Accept", openAPIV2mimePb)
-			w.Header().Set("Vary", "Accept")
-			w.WriteHeader(http.StatusOK)
-			bytes, err := proto.Marshal(openapiv2)
-			if err != nil {
-				a.Log.Error(err, "Error writing reponse body", "req", lr, "parsed", req.Request)
-				return
-			}
-			_, err = w.Write(bytes)
-			if err != nil {
-				a.Log.Error(err, "Error writing reponse body", "req", lr, "parsed", req.Request)
-				return
-			}
-		default:
-			a.Log.Error(nil, "Got request with unknown openapi version", "req", lr)
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-	}
+	return verbs, &req, lr, true
 }
 
 func (a *API) Authenticate(r *http.Request, req *RequestWithBody) (bool, error) {
@@ -860,333 +1102,11 @@ type Request struct {
 	Name      string
 	Verb      string
 	DryRun    bool
-	Body      io.Reader
 }
 
 type RequestWithBody struct {
 	Request
 	Body io.Reader
-}
-
-func ParseLegacyDiscoveryPath(parts []string, r *RequestWithBody) bool {
-	if len(parts) == 0 {
-		r.Type = RequestTypeLegacyDiscovery
-		return true
-	}
-	if len(parts) == 1 {
-		r.Type = RequestTypeLegacyDiscovery
-		r.Version = parts[0]
-		return true
-	}
-	return false
-}
-
-func ParseLegacyNamespacedSingleResourcePath(parts []string, r *RequestWithBody) bool {
-	if len(parts) != 5 {
-		return false
-	}
-	if parts[1] != "namespaces" {
-		return false
-	}
-	r.Type = RequestTypeLegacyResource
-	r.Group = ""
-	r.Version = parts[0]
-	r.Namespace = parts[2]
-	r.Kind = parts[3]
-	r.Name = parts[4]
-	return true
-}
-
-func ParseLegacyClusterSingleResourcePath(parts []string, r *RequestWithBody) bool {
-	if len(parts) != 3 {
-		return false
-	}
-	r.Type = RequestTypeLegacyResource
-	r.Group = ""
-	r.Version = parts[0]
-	r.Kind = parts[1]
-	r.Name = parts[2]
-	return true
-}
-
-func ParseLegacyNamespacedAllResourcesPath(parts []string, r *RequestWithBody) bool {
-	if len(parts) != 4 {
-		return false
-	}
-	if parts[1] != "namespaces" {
-		return false
-	}
-	r.Type = RequestTypeLegacyResource
-	r.Group = ""
-	r.Version = parts[0]
-	r.Namespace = parts[2]
-	r.Kind = parts[3]
-	return true
-}
-
-func ParseLegacyClusterAllResourcesPath(parts []string, r *RequestWithBody) bool {
-	if len(parts) != 2 {
-		return false
-	}
-	r.Type = RequestTypeLegacyResource
-	r.Group = ""
-	r.Version = parts[0]
-	r.Kind = parts[1]
-	return true
-}
-
-func ParseDiscoveryPath(parts []string, r *RequestWithBody) bool {
-	if len(parts) == 0 {
-		r.Type = RequestTypeDiscovery
-		return true
-	}
-	if len(parts) == 2 {
-		r.Type = RequestTypeDiscovery
-		r.Group = parts[0]
-		r.Version = parts[1]
-		return true
-	}
-	return false
-}
-
-func ParseNamespacedSingleResourcePath(parts []string, r *RequestWithBody) bool {
-	if len(parts) != 6 {
-		return false
-	}
-	if parts[2] != "namespaces" {
-		return false
-	}
-	r.Type = RequestTypeResource
-	r.Group = parts[0]
-	r.Version = parts[1]
-	r.Namespace = parts[3]
-	r.Kind = parts[4]
-	r.Name = parts[5]
-	return true
-}
-
-func ParseClusterSingleResourcePath(parts []string, r *RequestWithBody) bool {
-	if len(parts) != 4 {
-		return false
-	}
-	r.Type = RequestTypeResource
-	r.Group = parts[0]
-	r.Version = parts[1]
-	r.Kind = parts[2]
-	r.Name = parts[3]
-	return true
-}
-
-func ParseNamespacedAllResourcesPath(parts []string, r *RequestWithBody) bool {
-	if len(parts) != 5 {
-		return false
-	}
-	if parts[2] != "namespaces" {
-		return false
-	}
-	r.Type = RequestTypeResource
-	r.Group = parts[0]
-	r.Version = parts[1]
-	r.Namespace = parts[3]
-	r.Kind = parts[4]
-	return true
-}
-
-func ParseClusterAllResourcesPath(parts []string, r *RequestWithBody) bool {
-	if len(parts) != 3 {
-		return false
-	}
-	r.Type = RequestTypeResource
-	r.Group = parts[0]
-	r.Version = parts[1]
-	r.Kind = parts[2]
-	return true
-}
-
-func ParseOpenAPIPath(parts []string, r *RequestWithBody) bool {
-	if len(parts) == 1 {
-		r.Type = RequestTypeOpenAPI
-		r.Version = parts[0]
-		return true
-	}
-	return false
-}
-
-func (a *API) ParseRequest(r *http.Request, lr LoggableRequest, req *RequestWithBody) (bool, error) {
-	// URL Structure:
-	// - {prefix}/openapi/{version}: OpenAPI discovery.
-	// - {prefix}/api/{version}: Legacy (core/v1) api discovery.
-	// - {prefix}/api/{version}/[namespaces/{namespace}/]{kind}[/{name}]: Proxy access to legacy (core/v1) k8s resources.
-	// - {prefix}/apis/{group}/{version}: API discovery.
-	// - {prefix}/apis/{group}/{version}/[namespaces/{namespace}/]{kind}[/{name}]: Proxy access to k8s resources.
-
-	parts := strings.Split(strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/"), "/"), "/")
-	a.Log.Info("Parsing URL parts", "req", lr, "parts", parts)
-
-	if parts[0] == OpenAPIPrefix && r.Method == http.MethodGet {
-		if ParseOpenAPIPath(parts[1:], req) {
-			return true, nil
-		}
-		return false, nil
-	} else if parts[0] == LegacyPrefix {
-		switch r.Method {
-		case http.MethodHead:
-			// Checking permissions to single resource or listing all resources by type, used by UI
-			if ParseLegacyNamespacedSingleResourcePath(parts[1:], req) {
-				req.Verb = "get"
-			} else if ParseLegacyNamespacedAllResourcesPath(parts[1:], req) {
-				req.Verb = "list"
-			} else if ParseLegacyClusterSingleResourcePath(parts[1:], req) {
-				req.Verb = "get"
-			} else if ParseLegacyClusterAllResourcesPath(parts[1:], req) {
-				req.Verb = "list"
-			} else {
-				a.Log.Info("Can't parse HEAD as either single or all resources path", "req", lr)
-				return false, nil
-			}
-			req.DryRun = true
-			return true, nil
-		case http.MethodPost:
-			// Creating a resource
-			if !ParseLegacyNamespacedAllResourcesPath(parts[1:], req) {
-				a.Log.Info("Can't parse POST as all resources path", "req", lr)
-				return false, nil
-			}
-			req.Verb = "create"
-			req.Body = r.Body
-			return true, nil
-		case http.MethodGet:
-			// Either a reading single resource by name, or a list all of resource type
-			if ParseLegacyDiscoveryPath(parts[1:], req) {
-				// Discovery all apis or discovery group/version
-				return true, nil
-			} else if ParseLegacyNamespacedSingleResourcePath(parts[1:], req) {
-				// Get single namespaced object
-				req.Verb = "get"
-			} else if ParseLegacyNamespacedAllResourcesPath(parts[1:], req) {
-				// List all objects in namespace
-				req.Verb = "list"
-			} else if ParseLegacyClusterSingleResourcePath(parts[1:], req) {
-				// Get single cluster-scoped object
-				req.Verb = "get"
-			} else if ParseLegacyClusterAllResourcesPath(parts[1:], req) {
-				// List all objects in all namespaces
-				req.Verb = "list"
-			} else {
-				a.Log.Info("Can't parse GET as either single or multiple object path", "req", lr)
-				return false, nil
-			}
-			return true, nil
-		case http.MethodPut:
-			// Update a single resource by name
-			if !ParseLegacyNamespacedSingleResourcePath(parts[1:], req) {
-				a.Log.Info("Can't parse PUT as single resource path", "req", lr)
-				return false, nil
-			}
-			req.Verb = "update"
-			req.Body = r.Body
-			return true, nil
-		case http.MethodDelete:
-			// Either delete a single resource by name, or delete all resources in namespace
-			if ParseLegacyNamespacedSingleResourcePath(parts[1:], req) {
-				req.Verb = "delete"
-			} else if ParseLegacyNamespacedAllResourcesPath(parts[1:], req) {
-				req.Verb = "deletecollection"
-			} else if ParseLegacyNamespacedSingleResourcePath(parts[1:], req) {
-				req.Verb = "delete"
-			} else if ParseLegacyNamespacedAllResourcesPath(parts[1:], req) {
-				req.Verb = "deletecollection"
-			} else {
-				a.Log.Info("Can't parse DELETE as either single or multiple object path", "req", lr)
-				return false, nil
-			}
-			return true, nil
-		default:
-			a.Log.Info("Unknown method", "req", lr)
-			return false, nil
-		}
-	} else if parts[0] == APIsPrefix {
-		switch r.Method {
-		case http.MethodHead:
-			// Checking permissions to single resource or listing all resources by type, used by UI
-			if ParseNamespacedSingleResourcePath(parts[1:], req) {
-				req.Verb = "get"
-			} else if ParseNamespacedAllResourcesPath(parts[1:], req) {
-				req.Verb = "list"
-			} else if ParseClusterSingleResourcePath(parts[1:], req) {
-				req.Verb = "get"
-			} else if ParseClusterAllResourcesPath(parts[1:], req) {
-				req.Verb = "list"
-			} else {
-				a.Log.Info("Can't parse HEAD as either single or all resources path", "req", lr)
-				return false, nil
-			}
-			req.DryRun = true
-			return true, nil
-		case http.MethodPost:
-			// Creating a resource
-			if !ParseNamespacedAllResourcesPath(parts[1:], req) {
-				a.Log.Info("Can't parse POST as all resources path", "req", lr)
-				return false, nil
-			}
-			req.Verb = "create"
-			req.Body = r.Body
-			return true, nil
-		case http.MethodGet:
-			// Either a reading single resource by name, or a list all of resource type
-			if ParseDiscoveryPath(parts[1:], req) {
-				// Discovery all apis or discovery group/version
-				return true, nil
-			} else if ParseNamespacedSingleResourcePath(parts[1:], req) {
-				// Get single namespaced object
-				req.Verb = "get"
-			} else if ParseNamespacedAllResourcesPath(parts[1:], req) {
-				// List all objects in namespace
-				req.Verb = "list"
-			} else if ParseClusterSingleResourcePath(parts[1:], req) {
-				// Get single cluster-scoped object
-				req.Verb = "get"
-			} else if ParseClusterAllResourcesPath(parts[1:], req) {
-				// List all objects in all namespaces
-				req.Verb = "list"
-			} else {
-				a.Log.Info("Can't parse GET as either single or multiple object path", "req", lr)
-				return false, nil
-			}
-			return true, nil
-		case http.MethodPut:
-			// Update a single resource by name
-			if !ParseNamespacedSingleResourcePath(parts[1:], req) {
-				a.Log.Info("Can't parse PUT as single resource path", "req", lr)
-				return false, nil
-			}
-			req.Verb = "update"
-			req.Body = r.Body
-			return true, nil
-		case http.MethodDelete:
-			// Either delete a single resource by name, or delete all resources in namespace
-			if ParseNamespacedSingleResourcePath(parts[1:], req) {
-				req.Verb = "delete"
-			} else if ParseNamespacedAllResourcesPath(parts[1:], req) {
-				req.Verb = "deletecollection"
-			} else if ParseNamespacedSingleResourcePath(parts[1:], req) {
-				req.Verb = "delete"
-			} else if ParseNamespacedAllResourcesPath(parts[1:], req) {
-				req.Verb = "deletecollection"
-			} else {
-				a.Log.Info("Can't parse DELETE as either single or multiple object path", "req", lr)
-				return false, nil
-			}
-			return true, nil
-		default:
-			a.Log.Info("Unknown method", "req", lr)
-			return false, nil
-		}
-	} else {
-		a.Log.Info("Unknown path", "req", lr)
-		return false, nil
-	}
-
 }
 
 var kerrorMap = map[int][]func(error) bool{

@@ -75,9 +75,13 @@ var _ = BeforeSuite(func() {
 	api.K8s = k8sClient
 	api.Scheme = testCluster.Environment.Scheme
 	api.Decoder = serializer.NewCodecFactory(testCluster.Environment.Scheme).UniversalDeserializer()
-	Expect(ksched.RegisterType(api, "examples", new(ev1a1.Example), new(ev1a1.ExampleList), exampleInfo)).To(Succeed())
 
-	srv = httptest.NewServer(api)
+	Expect(ksched.RegisterType(api, "examples", new(ev1a1.Example), new(ev1a1.ExampleList), exampleInfo)).To(Succeed())
+	podInfo, blankPod, blankPodList, err := ksched.NoopObjectInfoFor(testCluster.Environment.Scheme, new(corev1.Pod), new(corev1.PodList), true)
+	Expect(err).ToNot(HaveOccurred())
+	Expect(ksched.RegisterType(api, "pods", blankPod, blankPodList, podInfo)).To(Succeed())
+
+	srv = httptest.NewServer(api.Mux())
 	DeferCleanup(srv.Close)
 
 	Expect(k8sClient.Create(ctx, &corev1.Namespace{
@@ -125,6 +129,7 @@ var (
 		},
 		Log: ctrl.Log.WithName("api"),
 	}
+
 	exampleInfo ksched.ObjectInfo[*ev1a1.Example, *ev1a1.ExampleList] = &exampleObjectInfo{archive: exampleArchive}
 
 	srv *httptest.Server
