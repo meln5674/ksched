@@ -161,6 +161,7 @@ func (s *Supervisor[O, OList]) Reconcile(ctx context.Context, req ctrl.Request) 
 			Req:        req,
 			Ctx:        ctx,
 			Now:        now,
+			Log:        s.Log.WithValues("namespace", req.Namespace, "name", req.Name),
 		}
 
 		continu, res, err := run.Start()
