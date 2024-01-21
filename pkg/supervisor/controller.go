@@ -300,12 +300,12 @@ func (r *SupervisorRun[O, OList]) CheckForCompletion() (bool, ctrl.Result, error
 
 		r.ObserveCompleted(r.Obj)
 
-		if r.Now.Sub(completedAt.Time) < r.ArchiveTTL {
-			r.Log.Info("Object is completed, but has not passed archive TTL, checking back in later", "now", r.Now, "completedAt", completedAt.Time, "archiveAt", completedAt.Time.Add(r.ArchiveTTL))
+		if r.Now.Sub(*completedAt) < r.ArchiveTTL {
+			r.Log.Info("Object is completed, but has not passed archive TTL, checking back in later", "now", r.Now, "completedAt", completedAt, "archiveAt", completedAt.Add(r.ArchiveTTL))
 			return false, ctrl.Result{Requeue: true, RequeueAfter: r.RequeueDelay}, nil
 		}
 
-		r.Log.Info("Object is completed and passed archive TTL, moving to archive", "now", r.Now, "completedAt", completedAt.Time, "archiveAt", completedAt.Time.Add(r.ArchiveTTL))
+		r.Log.Info("Object is completed and passed archive TTL, moving to archive", "now", r.Now, "completedAt", completedAt, "archiveAt", completedAt.Add(r.ArchiveTTL))
 		continu, res, err := r.ArchiveAndFinalize()
 		if !continu {
 			return false, res, err

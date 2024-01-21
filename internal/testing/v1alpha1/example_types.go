@@ -18,6 +18,9 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"time"
+
+	"github.com/meln5674/ksched/pkg/object"
 )
 
 type ExampleSpec struct {
@@ -57,14 +60,14 @@ func (e *Example) AssignedTo() string {
 	return e.Spec.AssignedTo
 }
 
-func (e *Example) Complete(now metav1.Time, successful bool) {
-	e.Status.CompletedAt = new(metav1.Time)
-	*e.Status.CompletedAt = now
+func (e *Example) Complete(now time.Time, successful bool) {
+	t := metav1.NewTime(now)
+	e.Status.CompletedAt = &t
 	e.Status.Successful = successful
 }
 
-func (e *Example) CompletedAt() *metav1.Time {
-	return e.Status.CompletedAt
+func (e *Example) CompletedAt() *time.Time {
+	return object.FromOptionalTime(e.Status.CompletedAt)
 }
 
 func (e *Example) Successful() bool {

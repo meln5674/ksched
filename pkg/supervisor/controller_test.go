@@ -423,7 +423,7 @@ var _ = Describe("Supervisor", Label("supervisor"), func() {
 					}, "5m", "30s").ShouldNot(Succeed())
 				}
 			})
-			now := metav1.Now()
+			now := time.Now()
 			Eventually(func() error {
 				Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(o), o)).To(Succeed())
 				o.Complete(now, true)
@@ -469,7 +469,7 @@ var _ = Describe("Supervisor", Label("supervisor"), func() {
 					}, "5m", "30s").ShouldNot(Succeed())
 				}
 			})
-			now := metav1.Now()
+			now := time.Now()
 			time.Sleep(2 * sv.ArchiveTTL)
 			Eventually(func() error {
 				Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(o), o)).To(Succeed())
