@@ -106,30 +106,30 @@ func StringSliceHasWildcard(haystack []string, needle string) bool {
 	return false
 }
 
-func RuleAllows(rule *rbacv1.PolicyRule, gvk schema.GroupVersionKind, name string, verb string) bool {
-	// Group, Version, and Kind must match or have a wildcard
+func RuleAllows(rule *rbacv1.PolicyRule, gvr schema.GroupVersionResource, name string, verb string) bool {
+	// Group, Version, and Resource must match or have a wildcard
 	// list and deletecollection do not consider resoruceNames, as they apply to the entire collection
 	// Other verbs must either match a resource name, or no resource names must be specified
 	isMultiVerb := verb == "list" || verb == "deletecollection"
 	return StringSliceHasWildcard(rule.Verbs, verb) &&
-		StringSliceHasWildcard(rule.APIGroups, gvk.Group) &&
-		StringSliceHasWildcard(rule.Resources, gvk.Kind) &&
+		StringSliceHasWildcard(rule.APIGroups, gvr.Group) &&
+		StringSliceHasWildcard(rule.Resources, gvr.Resource) &&
 		(isMultiVerb || len(rule.ResourceNames) == 0 || (name != "" && StringSliceHas(rule.ResourceNames, name)))
 }
 
-func RulesAllow(rules []rbacv1.PolicyRule, gvk schema.GroupVersionKind, name string, verb string) bool {
+func RulesAllow(rules []rbacv1.PolicyRule, gvr schema.GroupVersionResource, name string, verb string) bool {
 	for _, rule := range rules {
-		if RuleAllows(&rule, gvk, name, verb) {
+		if RuleAllows(&rule, gvr, name, verb) {
 			return true
 		}
 	}
 	return false
 }
 
-func (r *RequestRoles) Authorize(gvk schema.GroupVersionKind, key client.ObjectKey, verb string) bool {
+func (r *RequestRoles) Authorize(gvr schema.GroupVersionResource, key client.ObjectKey, verb string) bool {
 	if key.Namespace == "" {
 		for _, role := range r.VirtualClusterRoles {
-			if RulesAllow(role.Rules, gvk, key.Name, verb) {
+			if RulesAllow(role.Rules, gvr, key.Name, verb) {
 				return true
 			}
 		}
@@ -138,12 +138,12 @@ func (r *RequestRoles) Authorize(gvk schema.GroupVersionKind, key client.ObjectK
 			if role.Namespace != key.Namespace {
 				continue
 			}
-			if RulesAllow(role.Rules, gvk, key.Name, verb) {
+			if RulesAllow(role.Rules, gvr, key.Name, verb) {
 				return true
 			}
 		}
 		for _, role := range r.VirtualClusterRoles {
-			if RulesAllow(role.Rules, gvk, key.Name, verb) {
+			if RulesAllow(role.Rules, gvr, key.Name, verb) {
 				return true
 			}
 		}

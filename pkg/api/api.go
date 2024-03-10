@@ -49,6 +49,8 @@ type ObjectInfo[O client.Object, OList object.ObjectList[O]] interface {
 
 	// Namespaced returns true if this object is namespaced, false if it is cluster scoped
 	Namespaced() bool
+	// GVR returns the apiVersion and resource for this kind
+	GVR() schema.GroupVersionResource
 	// GVK returns the apiVersion and kind for this kind
 	GVK() schema.GroupVersionKind
 	// ListGVK returns the apiVersion and kind for this kind's list kind
@@ -62,6 +64,7 @@ type NoopObjectInfo[O client.Object, OList client.ObjectList] struct {
 	namespaced bool
 	blank      O
 	blankList  *noopObjectList[O, OList]
+	gvr        schema.GroupVersionResource
 	gvk        schema.GroupVersionKind
 	listGVK    schema.GroupVersionKind
 }
@@ -116,7 +119,7 @@ func (n *noopObjectList[O, OList]) UnmarshalJSON(data []byte) error {
 }
 
 // NoopObjectInfoFor wraps a typical Object and ObjectList, e.g. *corev1.Pod and *corev1.PodList, with info that performs no mutations and has no archive
-func NoopObjectInfoFor[O client.Object, OList client.ObjectList](scheme *runtime.Scheme, blank O, blankList OList, namespaced bool) (ObjectInfo[O, *noopObjectList[O, OList]], O, *noopObjectList[O, OList], error) {
+func NoopObjectInfoFor[O client.Object, OList client.ObjectList](scheme *runtime.Scheme, blank O, blankList OList, namespaced bool, resource string) (ObjectInfo[O, *noopObjectList[O, OList]], O, *noopObjectList[O, OList], error) {
 	gvks, _, err := scheme.ObjectKinds(blank)
 	if err != nil {
 		return nil, blank, nil, err
@@ -136,6 +139,7 @@ func NoopObjectInfoFor[O client.Object, OList client.ObjectList](scheme *runtime
 		namespaced: namespaced,
 		blank:      blank,
 		blankList:  noopBlankList,
+		gvr:        schema.GroupVersionResource{Group: gvks[0].Group, Version: gvks[0].Version, Resource: resource},
 		gvk:        gvks[0],
 		listGVK:    listGVKs[0],
 	}, blank, noopBlankList, nil
@@ -172,6 +176,11 @@ func (n *NoopObjectInfo[O, OList]) Namespaced() bool {
 }
 
 // GVK returns the apiVersion and kind for this kind
+func (n *NoopObjectInfo[O, OList]) GVR() schema.GroupVersionResource {
+	return n.gvr
+}
+
+// GVK returns the apiVersion and kind for this kind
 func (n *NoopObjectInfo[O, OList]) GVK() schema.GroupVersionKind {
 	return n.gvk
 }
@@ -191,6 +200,7 @@ type ArchivedObjectInfo[O object.Object, OList object.ObjectList[O]] struct {
 	namespaced bool
 	blank      O
 	blankList  OList
+	gvr        schema.GroupVersionResource
 	gvk        schema.GroupVersionKind
 	listGVK    schema.GroupVersionKind
 	archive    archive.Archiver[O, OList]
@@ -224,6 +234,11 @@ func (a *ArchivedObjectInfo[O, OList]) MutateForWrite(ctx context.Context, obj O
 // Namespaced returns true if this object is namespaced, false if it is cluster scoped
 func (a *ArchivedObjectInfo[O, OList]) Namespaced() bool {
 	return a.namespaced
+}
+
+// GVK returns the apiVersion and kind for this kind
+func (a *ArchivedObjectInfo[O, OList]) GVR() schema.GroupVersionResource {
+	return a.gvr
 }
 
 // GVK returns the apiVersion and kind for this kind
@@ -579,12 +594,12 @@ type API struct {
 	// TokenGetter obtains the JWT from a request
 	TokenGetter gotoken.TokenGetter
 
-	verbs map[schema.GroupVersionKind]verbs
+	verbs map[schema.GroupVersionResource]verbs
 }
 
-func RegisterType[O client.Object, OList object.ObjectList[O]](a *API, urlKind string, obj O, objs OList, info ObjectInfo[O, OList]) error {
+func RegisterType[O client.Object, OList object.ObjectList[O]](a *API, resource string, obj O, objs OList, info ObjectInfo[O, OList]) error {
 	if a.verbs == nil {
-		a.verbs = make(map[schema.GroupVersionKind]verbs)
+		a.verbs = make(map[schema.GroupVersionResource]verbs)
 	}
 	gvks, _, err := a.Scheme.ObjectKinds(info.New())
 	if err != nil {
@@ -593,16 +608,17 @@ func RegisterType[O client.Object, OList object.ObjectList[O]](a *API, urlKind s
 	if len(gvks) != 1 {
 		return fmt.Errorf("Did not get exactly one GroupVersionKind")
 	}
-	gvk := schema.GroupVersionKind{
-		Group:   gvks[0].Group,
-		Version: gvks[0].Version,
-		Kind:    urlKind,
+	gvk := gvks[0]
+	gvr := schema.GroupVersionResource{
+		Group:    gvk.Group,
+		Version:  gvk.Version,
+		Resource: resource,
 	}
-	a.verbs[gvk] = &TypedAPI[O, OList]{
+	a.verbs[gvr] = &TypedAPI[O, OList]{
 		info: info,
 		API:  a,
 	}
-	a.Log.Info("Registered API type", "gvk", gvk)
+	a.Log.Info("Registered API type", "gvk", gvk, "gvr", gvr)
 	return nil
 }
 
@@ -622,26 +638,26 @@ func (a *API) Mux() *minimux.Mux {
 
 		// - {prefix}/openapi/{version}: OpenAPI discovery.
 		// - {prefix}/api/[{version}/]: Legacy (core/v1) api discovery.
-		// - {prefix}/api/{version}/[namespaces/{namespace}/]{kind}[/{name}]: Proxy access to legacy (core/v1) k8s resources.
+		// - {prefix}/api/{version}/[namespaces/{namespace}/]{kind}[/{name}[/{subresource}]]: Proxy access to legacy (core/v1) k8s resources.
 		// - {prefix}/apis/[{group}[/{version}]]: API discovery.
-		// - {prefix}/apis/{group}/{version}/[namespaces/{namespace}/]{kind}[/{name}]: Proxy access to k8s resources.
+		// - {prefix}/apis/{group}/{version}/[namespaces/{namespace}/]{kind}[/{name}[/{subresource}]]: Proxy access to k8s resources.
 
 		openAPIDiscoveryPath = minimux.LiteralPath(prefix + "/openapi/v2")
 
 		legacyAPIDiscoveryPath         = minimux.PathPattern(prefix + "/api/?")
 		legacyAPIVersionDiscoveryPath  = minimux.PathWithVars(prefix+"/api/([^/]+)", "version")
-		legacyNamespacedCollectionPath = minimux.PathWithVars(prefix+"/api/([^/]+)/namespaces/([^/]+)/([^/]+)/?", "version", "namespace", "kind")
-		legacyNamespacedResourcePath   = minimux.PathWithVars(prefix+"/api/([^/]+)/namespaces/([^/]+)/([^/]+)/([^/]+)", "version", "namespace", "kind", "name")
-		legacyClusterCollectionPath    = minimux.PathWithVars(prefix+"/api/([^/]+)/([^/]+)/?", "version", "kind")
-		legacyClusterResourcePath      = minimux.PathWithVars(prefix+"/api/([^/]+)/([^/]+)/([^/]+)", "version", "kind", "name")
+		legacyNamespacedCollectionPath = minimux.PathWithVars(prefix+"/api/([^/]+)/namespaces/([^/]+)/([^/]+)/?", "version", "namespace", "resource")
+		legacyNamespacedResourcePath   = minimux.PathWithVars(prefix+"/api/([^/]+)/namespaces/([^/]+)/([^/]+)/([^/]+)(?:/([^/]+))?", "version", "namespace", "resource", "name", "subresource")
+		legacyClusterCollectionPath    = minimux.PathWithVars(prefix+"/api/([^/]+)/([^/]+)/?", "version", "resource")
+		legacyClusterResourcePath      = minimux.PathWithVars(prefix+"/api/([^/]+)/([^/]+)/([^/]+)", "version", "resource", "name")
 
 		apiDiscoveryPath             = minimux.PathPattern(prefix + "/apis/?")
 		apiGroupDiscoveryPath        = minimux.PathWithVars(prefix+"/apis/([^/]+)/?", "group")
 		apiGroupVersionDiscoveryPath = minimux.PathWithVars(prefix+"/apis/([^/]+)/([^/]+)/?", "group", "version")
-		namespacedCollectionPath     = minimux.PathWithVars(prefix+"/apis/([^/]+)/([^/]+)/namespaces/([^/]+)/([^/]+)/?", "group", "version", "namespace", "kind")
-		namespacedResourcePath       = minimux.PathWithVars(prefix+"/apis/([^/]+)/([^/]+)/namespaces/([^/]+)/([^/]+)/([^/]+)", "group", "version", "namespace", "kind", "name")
-		clusterCollectionPath        = minimux.PathWithVars(prefix+"/apis/([^/]+)/([^/]+)/([^/]+)/?", "group", "version", "kind")
-		clusterResourcePath          = minimux.PathWithVars(prefix+"/apis/([^/]+)/([^/]+)/([^/]+)/([^/]+)", "group", "version", "kind", "name")
+		namespacedCollectionPath     = minimux.PathWithVars(prefix+"/apis/([^/]+)/([^/]+)/namespaces/([^/]+)/([^/]+)/?", "group", "version", "namespace", "resource")
+		namespacedResourcePath       = minimux.PathWithVars(prefix+"/apis/([^/]+)/([^/]+)/namespaces/([^/]+)/([^/]+)/([^/]+)(?:/([^/]+))?", "group", "version", "namespace", "resource", "name", "subresource")
+		clusterCollectionPath        = minimux.PathWithVars(prefix+"/apis/([^/]+)/([^/]+)/([^/]+)/?", "group", "version", "resource")
+		clusterResourcePath          = minimux.PathWithVars(prefix+"/apis/([^/]+)/([^/]+)/([^/]+)/([^/]+)", "group", "version", "resource", "name")
 	)
 
 	openAPIRoutes := []minimux.Route{
@@ -1008,12 +1024,13 @@ func (a *API) ValidateRequest(ctx context.Context, w http.ResponseWriter, r *htt
 	}
 	req := RequestWithBody{
 		Request: Request{
-			Version:   pathVars["version"],
-			Group:     pathVars["group"],
-			Kind:      pathVars["kind"],
-			Namespace: pathVars["namespace"],
-			Name:      pathVars["name"],
-			Verb:      verb,
+			Version:     pathVars["version"],
+			Group:       pathVars["group"],
+			Resource:    pathVars["resource"],
+			Subresource: pathVars["subresource"],
+			Namespace:   pathVars["namespace"],
+			Name:        pathVars["name"],
+			Verb:        verb,
 		},
 		Body: r.Body,
 	}
@@ -1026,20 +1043,23 @@ func (a *API) ValidateRequest(ctx context.Context, w http.ResponseWriter, r *htt
 		w.WriteHeader(http.StatusUnauthorized)
 		return nil, nil, lr, false
 	}
-	gvk := schema.GroupVersionKind{Group: req.Group, Version: req.Version, Kind: req.Kind}
+	gvr := schema.GroupVersionResource{Group: req.Group, Version: req.Version, Resource: req.Resource}
+	if req.Subresource != "" {
+		gvr.Resource = fmt.Sprintf("%s/%s", req.Resource, req.Subresource)
+	}
 	roles, err := a.RBACPolicy.GetRoles(req.Token)
 	if err != nil {
 		a.Log.Error(err, "Error preparing authorization", "req", lr, "parsed", req.Request)
 		w.WriteHeader(http.StatusForbidden)
 		return nil, nil, lr, false
 	}
-	ok = roles.Authorize(gvk, client.ObjectKey{Namespace: req.Namespace, Name: req.Name}, req.Verb)
+	ok = roles.Authorize(gvr, client.ObjectKey{Namespace: req.Namespace, Name: req.Name}, req.Verb)
 	if !ok {
 		a.Log.Info("Request is not authorized", "req", lr, "parsed", req.Request)
 		w.WriteHeader(http.StatusForbidden)
 		return nil, nil, lr, false
 	}
-	verbs, ok := a.verbs[gvk]
+	verbs, ok := a.verbs[gvr]
 	if !ok {
 		a.Log.Info("Got request for unknown object type", "req", lr, "parsed", req.Request)
 		w.WriteHeader(http.StatusNotFound)
@@ -1093,15 +1113,16 @@ const (
 )
 
 type Request struct {
-	Type      RequestType
-	Token     *jwt.Token
-	Version   string
-	Group     string
-	Kind      string
-	Namespace string
-	Name      string
-	Verb      string
-	DryRun    bool
+	Type        RequestType
+	Token       *jwt.Token
+	Version     string
+	Group       string
+	Resource    string
+	Subresource string
+	Namespace   string
+	Name        string
+	Verb        string
+	DryRun      bool
 }
 
 type RequestWithBody struct {

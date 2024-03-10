@@ -77,7 +77,7 @@ var _ = BeforeSuite(func() {
 	api.Decoder = serializer.NewCodecFactory(testCluster.Environment.Scheme).UniversalDeserializer()
 
 	Expect(ksched.RegisterType(api, "examples", new(ev1a1.Example), new(ev1a1.ExampleList), exampleInfo)).To(Succeed())
-	podInfo, blankPod, blankPodList, err := ksched.NoopObjectInfoFor(testCluster.Environment.Scheme, new(corev1.Pod), new(corev1.PodList), true)
+	podInfo, blankPod, blankPodList, err := ksched.NoopObjectInfoFor(testCluster.Environment.Scheme, new(corev1.Pod), new(corev1.PodList), true, "pods")
 	Expect(err).ToNot(HaveOccurred())
 	Expect(ksched.RegisterType(api, "pods", blankPod, blankPodList, podInfo)).To(Succeed())
 
@@ -169,6 +169,14 @@ func (e *exampleObjectInfo) MutateForWrite(ctx context.Context, obj *ev1a1.Examp
 
 func (e *exampleObjectInfo) Namespaced() bool {
 	return true
+}
+
+func (e *exampleObjectInfo) GVR() schema.GroupVersionResource {
+	return schema.GroupVersionResource{
+		Group:    ev1a1.GroupVersion.Group,
+		Version:  ev1a1.GroupVersion.Version,
+		Resource: "examples",
+	}
 }
 
 func (e *exampleObjectInfo) GVK() schema.GroupVersionKind {
